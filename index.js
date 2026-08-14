@@ -404,6 +404,11 @@ export function apply(ctx, config = {}) {
           message: { type: "string", required: true, description: "结果说明（成功提示或错误信息）" },
         },
       },
+      // 纯文本渲染：把结构化结果转成模型/用户可读文字
+      render: (_args, value) => {
+        const icon = value?.ok ? "✅" : "❌";
+        return [{ type: "text", text: `${icon} ${value?.message ?? "未知结果"}` }];
+      },
     },
     timeoutMs: 60000,
     isConcurrencySafe: () => false,
