@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Bridge QQ official bot private messages (C2C) into DeepSeek Harness (dsh) agent sessions",
   "type": "module",
   "main": "index.js",
@@ -26,6 +26,7 @@
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-tools": "*",
     "zod": "^3 || ^4"
   },
   "engines": {

@@ -11,6 +11,7 @@
 - ✅ 私聊消息 → 对应 openid 的独立 dsh 会话（懒创建 + 重启 resume）
 - ✅ 图片附件自动下载到 agent 工作目录的 `inbox/`（文本模型也能通过本地文件工具处理）
 - ✅ 回复自动回发（完整 turn 结束后的最终文本）
+- ✅ **发图工具 `qq-send-image`**（v2.0）：agent 可把本地图片直接推送给当前 QQ 用户（富媒体消息 `msg_type: 7`；仅 QQ 会话可用，GUI 会话返回友好错误）
 - ✅ 原生 WebSocket 网关：心跳保活、断线 10s/30s 自动重连、access_token 提前 5 分钟自动刷新
 - ✅ 进程级兜底：未捕获异常只写日志，不会拖垮 dsh 进程
 - ✅ 文件日志：`$DSH_HOME/storages/qq-bot.log`（排查全靠它）
@@ -53,11 +54,13 @@ QQ 用户 ──私聊──▶ QQ 开放平台网关 (WSS)
                 dsh-qq-bot 插件
                  ├─ 图片附件 → 下载到 <cwd>/inbox/
                  ├─ 文本 + 附件路径 → createUserMessage → 该 openid 的 agent 会话
-                 └─ session/event 监听 turn 结束 → 最终文本 → POST /v2/users/<openid>/messages 回发
+                 ├─ session/event 监听 turn 结束 → 最终文本 → POST /v2/users/<openid>/messages 回发
+                 └─ 工具 qq-send-image：agent 上传本地图片（POST /files）→ 富媒体消息回发
 ```
 
 - 会话映射持久化在 `$DSH_HOME/storages/qq-bot-sessions.json`（openid → sessionId）。
 - 图片以**本地路径**进入 agent 上下文（不经过图像模态），纯文本模型也能处理。
+- 发图工具通过 `exec.agent.id`（sessionId）反查 openid，多用户各发各的。
 - 断线重连：网关关闭 10 秒重连；获取 token/网关失败 30 秒重试。
 
 ## 已知注意事项

@@ -19,6 +19,7 @@
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 import { z } from "zod";
 import { homedir } from "node:os";
 import { join, extname } from "node:path";
@@ -26,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 
 export const name = "qq-bot";
-export const inject = ["agents", "agentPresets", "agentDefaultModel"];
+export const inject = ["agents", "agentPresets", "agentDefaultModel", "tools"];
 
 export const Config = z.object({
   appId: z.string().min(1).optional(),
@@ -107,6 +108,14 @@ export function apply(ctx, config = {}) {
   };
   let openidToSession = loadMap();
 
+  // ---- sessionId → openid 反查（供发图工具路由到正确的 QQ 用户）----
+  const openidForSession = (sid) => {
+    for (const [openid, s] of Object.entries(openidToSession)) {
+      if (s === sid) return openid;
+    }
+    return null;
+  };
+
   // ---- live agent 与待回复状态 ----
   const handles = new Map(); // openid -> AgentHandle
   const pending = new Map(); // sessionId -> { turns: Map<turn, text>, reply: (text) => void }
@@ -124,6 +133,32 @@ export function apply(ctx, config = {}) {
         ctx.logger.warn(`[qq-bot] 回复失败 ${res.status}: ${body.slice(0, 200)}`);
       }
     } catch (e) { ctx.logger.warn(`[qq-bot] 回复异常: ${e?.message ?? e}`); }
+  };
+
+  // ---- 发送图片到 QQ 私聊（富媒体消息：上传 → msg_type=7）----
+  const sendImageToQq = async (openid, imagePath, msgId) => {
+    const buf = readFileSync(imagePath);
+    const token = await getAccessToken();
+    const upRes = await fetch(`${API_BASE}/v2/users/${encodeURIComponent(openid)}/files`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `QQBot ${token}` },
+      body: JSON.stringify({ file_type: 1, file_data: buf.toString("base64"), srv_send_msg: false }),
+    });
+    if (!upRes.ok) throw new Error(`上传图片失败 ${upRes.status}: ${(await upRes.text()).slice(0, 200)}`);
+    const up = JSON.parse(await upRes.text());
+    if (!up?.file_info) throw new Error("上传图片未返回 file_info");
+    const msgRes = await fetch(`${API_BASE}/v2/users/${encodeURIComponent(openid)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `QQBot ${token}` },
+      body: JSON.stringify({
+        media: { file_info: up.file_info },
+        msg_type: 7,
+        msg_id: msgId || "",
+        msg_seq: 1,
+      }),
+    });
+    if (!msgRes.ok) throw new Error(`发送图片失败 ${msgRes.status}: ${(await msgRes.text()).slice(0, 200)}`);
+    dlog(`图片已发送: ${imagePath}`);
   };
 
   // ---- 下载 QQ 图片附件到 agent 工作目录（纯文本模型也能通过文件工具处理）----
@@ -345,6 +380,50 @@ export function apply(ctx, config = {}) {
   }
 
   connectGateway();
+
+  // ---- 工具：QQ 发图（qq-send-image）----
+  ctx.tools.register(defineTool({
+    name: "qq-send-image",
+    description:
+      "把本地图片文件发送给当前 QQ 对话用户（QQ 富媒体消息）。" +
+      "仅当对话来自 QQ 私聊时可用（GUI 会话调用会返回错误）。" +
+      "参数 imagePath 为图片文件的本地绝对路径（png/jpg/jpeg/gif/webp）。",
+    parameters: {
+      imagePath: {
+        type: "string",
+        required: true,
+        description: "要发送的图片文件本地绝对路径（png/jpg/jpeg/gif/webp）",
+      },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean", required: true, description: "是否发送成功" },
+          message: { type: "string", required: true, description: "结果说明（成功提示或错误信息）" },
+        },
+      },
+    },
+    timeoutMs: 60000,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const sid = exec?.agent?.id;
+      const openid = sid ? openidForSession(sid) : null;
+      if (!openid) {
+        return { ok: false, message: "当前会话不是 QQ 私聊会话（找不到对应的 QQ openid），无法发送图片。" };
+      }
+      const path = String(args?.imagePath ?? "").trim();
+      if (!path) return { ok: false, message: "缺少 imagePath 参数。" };
+      try {
+        await sendImageToQq(openid, path, undefined);
+        return { ok: true, message: `图片已发送到 QQ：${path}` };
+      } catch (e) {
+        dlog(`发图失败: ${e?.stack ?? e}`);
+        return { ok: false, message: `QQ 发图失败：${e?.message ?? e}` };
+      }
+    },
+  }));
 
   ctx.on("dispose", () => {
     closed = true;
