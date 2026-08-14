@@ -1,5 +1,7 @@
 # dsh-qq-bot
 
+[![CI](https://github.com/hZsFN/dsh-qq-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/hZsFN/dsh-qq-bot/actions/workflows/ci.yml)
+
 把 **QQ 官方机器人私聊（C2C）** 桥接进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) 的 agent 会话。
 
 每个 QQ 用户（openid）对应一个持久化的 dsh 会话，会话历史即上下文；dsh 重启后自动 resume 恢复历史。agent 的回复经 QQ 网关实时发回。**只处理私聊，不处理群消息。**

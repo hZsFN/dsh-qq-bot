@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Syntax check
+        run: node --check index.js
+
+      - name: Secret leak scan
+        run: |
+          if grep -rniE --include='*.js' --include='*.mjs' --include='*.yml' --include='*.json' --include='*.md' \
+            -e 'ghp_[A-Za-z0-9]{20,}' \
+            -e 'gho_[A-Za-z0-9]{20,}' \
+            -e 'github_pat_[A-Za-z0-9_]{20,}' \
+            -e 'sk-[A-Za-z0-9]{20,}' \
+            -e 'clientSecret:[[:space:]]*["'"'"'][A-Za-z0-9]{8,}["'"'"']' \
+            .; then
+            echo "::error::Potential secret detected in repository files"
+            exit 1
+          fi
+          echo "leak scan: clean"
