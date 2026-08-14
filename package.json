@@ -1,0 +1,34 @@
+{
+  "name": "dsh-qq-bot",
+  "version": "1.0.0",
+  "description": "Bridge QQ official bot private messages (C2C) into DeepSeek Harness (dsh) agent sessions",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE",
+    "cordis.patch.example.yml"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "qq-bot",
+    "qq",
+    "bridge"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "zod": "^3 || ^4"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,12 @@
+# dsh-qq-bot 配置示例 — 复制到 profile 的 cordis.patch.yml 并替换占位符
+# 凭证更推荐用环境变量：QQ_BOT_APP_ID / QQ_BOT_APP_SECRET（不落盘）
+- insert:
+    - id: qq-bot
+      name: ./qq-bot-plugin/index.js
+      config:
+        enabled: true
+        # 以下两项二选一：填这里 或 设置环境变量（留空则读环境变量）
+        appId: 'YOUR_QQ_BOT_APP_ID'
+        clientSecret: 'YOUR_QQ_BOT_APP_SECRET'
+        # agent 工作目录（图片附件下载到 <cwd>/inbox/）；留空默认 dsh 进程 cwd
+        cwd: 'C:\path\to\agent\workspace'
