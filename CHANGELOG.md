@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.1.0 (2026-10-19)
+
+### 新增
+- **群聊支持**：响应 `GROUP_AT_MESSAGE_CREATE`（群里 @机器人），每个 `<group_openid>` 一个独立会话（前缀 `qq-grp2-`），可挂 `qqgroup` 预设实现「群里只能聊天、不能用本机工具」，与私聊会话互不影响
+- **发文件工具 `qq-send-file`**：`file_type: 4`，≤5 MB 走 base64 直传，>5 MB 走分片上传四步（`upload_prepare` → 分片 PUT → `upload_part_finish` → `files` 合并），上限 200 MB，`md5_10m` 秒传
+- **主动发消息工具 `qq-send-message`**：不要求当前会话来自 QQ，可主动推送纯文字
+- **通用附件下载**：从「只下载图片」扩展到约 30 类扩展名（PDF / Office / 压缩包 / 音视频等），未知类型按 `Content-Type` → 文件名 → URL 依次推断，兜底 `.bin`；收到附件后提示 agent「已保存到本机，请直接读取」
+- 新配置项：`fixedSessionId`、`allowedGroups`、`ownerOpenids`、`ownerGroupMembers`
+
+### 变更
+- 凭证支持**环境变量** `QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET`（config 优先，环境变量兜底，便于密钥不落盘）
+- `cwd` 缺省值改为 `$DSH_QQ_BOT_CWD`，再缺省用进程 cwd（不再内置任何机器专属路径）
+- `inject` 增加 `systemPrompt`
+- README 改为中文主位，新增英文版 `README_EN.md`
+
+### 修复
+- 工具调用缺少 `output.render` 导致崩溃
+- 网关多实例互顶 token、boot 阶段致命错误不退出等稳定性问题
+
 ## v2.0.0 (2026-08-14)
 
 ### 新增
