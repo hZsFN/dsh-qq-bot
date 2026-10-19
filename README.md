@@ -1,3 +1,5 @@
+[![](https://img.shields.io/badge/powered_by-dafeiyu-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/Dafeiyu111)
+
 # dsh-qq-bot
 
 [![CI](https://github.com/hZsFN/dsh-qq-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/hZsFN/dsh-qq-bot/actions/workflows/ci.yml)
@@ -73,5 +75,3 @@ QQ 用户 ──私聊──▶ QQ 开放平台网关 (WSS)
 ## License
 
 MIT
-
-[![](https://img.shields.io/badge/powered_by-dafeiyu-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/Dafeiyu111)
