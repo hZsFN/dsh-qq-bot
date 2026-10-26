@@ -1,12 +1,56 @@
-# dsh-qq-bot 配置示例 — 复制到 profile 的 cordis.patch.yml 并替换占位符
+# dsh-qq-bot 配置示例 —— 复制到 profile 的 cordis.patch.yml，替换占位符
 # 凭证更推荐用环境变量：QQ_BOT_APP_ID / QQ_BOT_APP_SECRET（不落盘）
+# 本文件只放示例值，真实 token / QQ 号不要提交进仓库
 - insert:
     - id: qq-bot
       name: ./qq-bot-plugin/index.js
       config:
+        # ---- 后端：official = QQ 官方机器人；onebot = NapCat / SnowLuma ----
+        backend: 'official'
         enabled: true
-        # 以下两项二选一：填这里 或 设置环境变量（留空则读环境变量）
+
+        # ---- official 后端（backend: 'official' 时生效）----
+        # 二选一：填这里 或 设置环境变量（留空则读环境变量）
         appId: 'YOUR_QQ_BOT_APP_ID'
         clientSecret: 'YOUR_QQ_BOT_APP_SECRET'
-        # agent 工作目录（图片附件下载到 <cwd>/inbox/）；留空默认 dsh 进程 cwd
+
+        # agent 工作目录（附件下载到 <cwd>/inbox/）；留空默认 dsh 进程 cwd
         cwd: 'C:\path\to\agent\workspace'
+        # 统一指定 agent 预设；留空 = 群用 qqgroup、私聊用默认预设
+        preset: ''
+        # 可选：把私聊固定绑到某个会话
+        # fixedSessionId: session-xxxxxxxx
+
+        # ---- onebot 后端（backend: 'onebot' 时生效）----
+        onebot:
+          # 协议端的 OneBot v11 HTTP API：发消息走这里
+          apiBase: 'http://127.0.0.1:3000'
+          accessToken: 'YOUR_HTTP_TOKEN'
+          # 事件来源：ws = 插件主动连正向 WS；http = 插件起服务收上报
+          events: 'ws'
+          wsUrl: 'ws://127.0.0.1:3001'
+          # 注意：HTTP 与 WS 的 token 常常是两个不同值，留空则回退 accessToken
+          wsToken: 'YOUR_WS_TOKEN'
+          # 机器人自己的 QQ 号（防回环 / @ 判定用）
+          selfId: 'YOUR_BOT_QQ'
+          # HTTP 上报监听（events: 'http' 时用）
+          listenHost: '127.0.0.1'
+          listenPort: 3200
+          listenPath: '/onebot'
+          # 上报签名密钥，留空则不校验 X-Signature
+          secret: ''
+          # 群里只回 @；false = 全量群消息都进 agent
+          atOnly: true
+          # 没被 @ 时，只有文本命中这些词才接；空数组 = 不过滤
+          groupKeywords: []
+          # 非 @ 消息的接话冷却秒数，0 = 不冷却
+          groupCooldownSec: 0
+          # 主人白名单（真实 QQ 号）。OneBot 模式下私聊也必须是白名单
+          ownerUsers: []
+
+        # ---- 运行时热配置（可选）----
+        # 指向插件目录下的 JSON 文件名，插件每 3 秒读一次；改它不必重启 dsh
+        # 该文件含真实配置，记得加进 .gitignore
+        # runtimeConfig: 'runtime-config.json'
+        # 设置界面端口（默认 3211，改完要重启）
+        # settingsPort: 3211

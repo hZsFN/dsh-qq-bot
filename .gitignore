@@ -2,3 +2,8 @@ node_modules/
 *.log
 *.bak-*
 .DS_Store
+# 运行时数据：含真实 token / QQ 号 / openid，绝不进仓库
+runtime-config.json
+qq-bot-sessions.json
+inbox/
+*.local.html

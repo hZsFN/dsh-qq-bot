@@ -1,6 +1,14 @@
-// dsh-qq-bot: 把 QQ 官方机器人私聊桥接进 DSH agent 会话。
-// 每个 QQ 用户对应一个持久化 DSH 会话（默认 preset），会话历史即上下文；
-// dsh 重启后通过 resume 恢复历史。agent 回复经 QQ 网关发回。
+// dsh-qq-bot: 把 QQ 桥接进 DSH agent 会话（双后端）。
+// 每个 QQ 用户/群对应一个持久化 DSH 会话（默认 preset），会话历史即上下文；
+// dsh 重启后通过 resume 恢复历史。agent 回复经当前后端发回。
+//
+// [2026-10-26 by 大肥鱼] 新增 backend 配置，一套插件两种后端：
+//   backend=official（默认）：QQ 官方机器人（api.bot.qq.com），要 appId/clientSecret
+//   backend=onebot          ：NapCat / SnowLuma / LLOneBot 等 OneBot v11 实现，用 QQ 号登录，
+//                             走 OneBot HTTP API 发送 + HTTP 上报（或正向 WS）接收
+// 两种后端共用同一套下游：会话映射、主人识别、附件下载、agent 懒加载、回发分派。
+// 分派点是同名的 sendText / sendImageTo / sendFileTo；收消息侧由 OneBot 事件归一成
+// 「伪官方事件」再交给 onIncomingMessage，所以下游一行都不用改。
 //
 // QQ 凭证流程（官方 api-v2，与 OpenClaw 的 qqbot 通道同源）：
 //   POST https://api.bot.qq.com/app/getAppAccessToken {appId, clientSecret} → access_token（约 2 小时有效，自动刷新）
@@ -9,6 +17,13 @@
 //   发消息: POST https://api.bot.qq.com/v2/users/<openid>/messages (QQBot <token>)
 //   群聊:   POST https://api.bot.qq.com/v2/groups/<group_openid>/messages（事件 GROUP_AT_MESSAGE_CREATE）
 //   群会话单独绑定：qq-grp-<group_openid 前 8 位>（挂 qqgroup 预设：只聊天、无本机工具），与私聊 qq-main-<openid 前 8 位> 互不影响
+//
+// OneBot 流程（backend=onebot，NapCat/SnowLuma 本机跑）：
+//   发送: POST {onebot.apiBase}/send_private_msg | send_group_msg | upload_group_file | upload_private_file
+//         Authorization: Bearer <onebot.accessToken>
+//   接收: OneBot 配「HTTP 上报」→ http://{listenHost}:{listenPort}/{listenPath}（可带 secret 校验）
+//         或 onebot.events=ws 时主动连正向 WebSocket（token 走 ?access_token=）
+//   身份: 私聊 target = "<QQ号>"，群 target = "group:<群号>"；群消息默认只有 @ 机器人才响应（atOnly）
 //
 // 三个必须注意的 DSH 内部约定（均为实测踩坑记录）：
 //   1. setup 返回值若含 .commit() 会被创建流程调用 → 必须返回 undefined
@@ -26,20 +41,24 @@ import { z } from "zod";
 import { homedir } from "node:os";
 import { join, extname, basename } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 export const name = "qq-bot";
 export const inject = ["agents", "agentPresets", "agentDefaultModel", "tools", "systemPrompt"];
 
-
-// 缺省工作目录：优先环境变量 DSH_QQ_BOT_CWD，其次用户主目录下的 .deepseek harness。
-// 发布版不含任何真实机器路径。
-const DEFAULT_CWD = process.env.DSH_QQ_BOT_CWD || process.cwd();
-
 export const Config = z.object({
-  appId: z.string().min(1).optional(),
-  clientSecret: z.string().min(1).optional(),
+  // 后端选择：official = QQ 官方机器人（api.bot.qq.com）；onebot = NapCat / SnowLuma 等 OneBot v11 实现
+  backend: z.enum(["official", "onebot"]).default("official"),
+  // 官方机器人凭证（backend=official 时必填；onebot 模式可留空）
+  appId: z.string().optional(),
+  clientSecret: z.string().optional(),
   enabled: z.boolean().default(true),
   cwd: z.string().default(""),
+  // [2026-10-26] QQ 会话挂哪个 agent preset：留空 = 群用 qqgroup、私聊用默认 dafeiyu；填 qqgroup 则私聊也用群聊预设
+  preset: z.string().default(""),
+  // 运行时配置文件路径；留空 = 插件目录下的 runtime-config.json
+  runtimeConfig: z.string().default(""),
+  settingsPort: z.number().int().min(1).max(65535).default(3211),
   // 可选：把 QQ 会话固定绑到指定 sessionId（默认回落 qq-main-<openid前8位>）
   fixedSessionId: z.string().optional(),
   // 可选：只响应这些群（group_openid 列表）；留空 = 所有群都响应
@@ -48,6 +67,37 @@ export const Config = z.object({
   ownerOpenids: z.array(z.string()).default([]),
   // 手动指定群成员 openid 白名单（可选：QQ 群消息只给匿名的 member_openid，不给昵称）
   ownerGroupMembers: z.array(z.string()).default([]),
+  // ---- OneBot v11 后端（backend=onebot 时生效）----
+  // [2026-10-26 by 大肥鱼] 新增：让本插件同时支持 NapCat / SnowLuma 这类 OneBot 实现，
+  // 用 QQ 小号登录收消息，不再受官方机器人「群里只推 @消息」「openid 与 QQ 号无关」的限制。
+  onebot: z.object({
+    // OneBot HTTP API 地址（发送消息走这里）
+    apiBase: z.string().default("http://127.0.0.1:3000"),
+    // OneBot 的 access_token（Authorization: Bearer）；后端没设就留空
+    accessToken: z.string().default(""),
+    // 机器人自己的 QQ 号：用于识别群里是否 @ 了自己、以及过滤自发消息（防回环）
+    selfId: z.string().default(""),
+    // 事件来源：http = 我们起服务端收 OneBot 的 HTTP 上报（最稳）；ws = 主动连 OneBot 的正向 WebSocket
+    events: z.enum(["http", "ws"]).default("http"),
+    // events=http 时监听的地址/端口/路径（只绑本机；把 OneBot 的「HTTP 上报」指到这里）
+    listenHost: z.string().default("127.0.0.1"),
+    listenPort: z.number().int().min(1).max(65535).default(3200),
+    listenPath: z.string().default("/onebot"),
+    // 上报签名密钥（OneBot 的 secret；留空 = 不校验）
+    secret: z.string().default(""),
+    // events=ws 时的 WebSocket 地址；留空则由 apiBase 推算（http://127.0.0.1:3000 → ws://127.0.0.1:3001）
+    wsUrl: z.string().default(""),
+    // [2026-10-26] events=ws 专用 token：协议端 HTTP 与 WS 两套 token 不同时用这个，留空则回退 accessToken
+    wsToken: z.string().default(""),
+    // 群里是否只有 @ 机器人才回（官方机器人就是这个语义；想全量收群消息就设 false）
+    atOnly: z.boolean().default(true),
+    // 群里没 @ 我时的接话冷却（秒）：0 = 不冷却。@ 我或引用我的消息不受此限制
+    groupCooldownSec: z.number().default(0),
+    // 群里没 @ 我时，只有文本里出现这些词才接（区分大小写不敏感）；留空数组 = 不按关键词过滤
+    groupKeywords: z.array(z.string()).default(["肥鱼"]),
+    // 主人 QQ 号白名单（OneBot 给的是真实 QQ 号，比 openid 指纹可靠）
+    ownerUsers: z.array(z.string()).default([]),
+  }).default({}),
 });
 
 const API_BASE = "https://api.bot.qq.com";
@@ -80,16 +130,53 @@ process.on("uncaughtException", (err) => {
 
 export function apply(ctx, config = {}) {
   if (config.enabled === false) return;
-
-  // 凭证来源：config 优先，其次环境变量（推荐环境变量，避免密钥落盘）
-  const appId = config.appId || process.env.QQ_BOT_APP_ID || "";
-  const clientSecret = config.clientSecret || process.env.QQ_BOT_APP_SECRET || "";
-  if (!appId || !clientSecret) {
-    ctx.logger.warn(
-      "[qq-bot] 未配置 appId/clientSecret（config 或 QQ_BOT_APP_ID/QQ_BOT_APP_SECRET 环境变量），插件不启用",
-    );
+  // 后端分派：official（官方机器人）/ onebot（NapCat、SnowLuma 等 OneBot v11 实现）
+  let backend = config.backend === "onebot" ? "onebot" : "official";
+  let obCfg = {
+    apiBase: "http://127.0.0.1:3000",
+    accessToken: "",
+    selfId: "",
+    events: "http",
+    listenHost: "127.0.0.1",
+    listenPort: 3200,
+    listenPath: "/onebot",
+    secret: "",
+    wsUrl: "",
+    wsToken: "",
+    atOnly: true,
+    groupCooldownSec: 0,
+    groupKeywords: ["肥鱼"],
+    ownerUsers: [],
+    ...(config.onebot || {}),
+  };
+  if (backend === "official" && (!config.appId || !config.clientSecret)) {
+    ctx.logger.warn("[qq-bot] backend=official 但未配置 appId/clientSecret，插件不启用");
     return;
   }
+  if (backend === "onebot" && !obCfg.selfId) {
+    ctx.logger.warn("[qq-bot] backend=onebot 但未配置 onebot.selfId（机器人自己的 QQ 号）：@ 识别与防回环会失效");
+  }
+  dlog(`插件启动: backend=${backend}${backend === "onebot" ? ` events=${obCfg.events} api=${obCfg.apiBase} self=${obCfg.selfId || "?"}` : ""}`);
+
+  // ---- 运行时配置（独立文件 + 定时热读）----
+  // [2026-10-26 by 大肥鱼] 起因：本 profile 改 cordis.patch.yml 必须重启 DSH 才生效
+  // （实测：改 backend 后 26 秒零重载）。做法：常用项挪到独立 JSON，插件每 3 秒 stat 一次，
+  // 变了就热应用；patch 里只留最小启动配置。
+  // 支持热改：backend / preset / onebot.{apiBase,accessToken,wsToken,wsUrl,selfId,events,
+  //           listenHost,listenPort,listenPath,secret,atOnly,groupKeywords,groupCooldownSec,ownerUsers}
+  let presetValue = String(config.preset || "").trim();
+  const runtimeFile = (() => {
+    try {
+      if (config.runtimeConfig) return String(config.runtimeConfig);
+      return join(fileURLToPath(new URL(".", import.meta.url)), "runtime-config.json");
+    } catch (e) {
+      dlog(`运行时配置路径解析失败: ${e?.message ?? e}`);
+      return "";
+    }
+  })();
+  let runtimeStamp = "";
+  let runtimeTimer = null;
+  let runtimeMissingWarned = false;
 
   // ---- access_token 管理（提前 5 分钟刷新）----
   let tokenCache = { token: "", expiresAt: 0 };
@@ -100,7 +187,7 @@ export function apply(ctx, config = {}) {
     const res = await fetch(`${API_BASE}/app/getAppAccessToken`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ appId, clientSecret }),
+      body: JSON.stringify({ appId: config.appId, clientSecret: config.clientSecret }),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -159,6 +246,13 @@ export function apply(ctx, config = {}) {
   };
   const isOwnerAuthor = (a) => {
     if (!a) return false;
+    // [2026-10-26] OneBot 后端专用判据：只认 onebot.ownerUsers 里列出的真实 QQ 号。
+    // 关键差异：OneBot 的 member_role="owner" 意思是「群主」，不是「主人」——沿用官方那套
+    // 会让任何一个群主白拿本机工具权限，所以这里必须换判据，且白名单为空就谁都不算。
+    if (backend === "onebot") {
+      const uid = String(a.member_openid ?? a.user_openid ?? a.union_openid ?? "");
+      return uid !== "" && obCfg.ownerUsers.includes(uid);
+    }
     // 2026-10-14：QQ 群消息其实带 member_role（owner=群主）和 username，直接用它最可靠
     if (a.member_role === "owner") return true;
     const name = typeof a.username === "string" ? a.username.trim() : "";
@@ -192,7 +286,8 @@ export function apply(ctx, config = {}) {
   const apiPath = (t, tail) =>
     `${API_BASE}/v2/${t.kind === "group" ? "groups" : "users"}/${encodeURIComponent(t.id)}/${tail}`;
 
-  const sendText = async (target, text, msgId) => {
+  // 官方后端：发文字（msg_id 用于被动回复，QQ 要求带上被回复消息 id）
+  const officialSendText = async (target, text, msgId) => {
     const t = parseTarget(target);
     try {
       const token = await getAccessToken();
@@ -209,7 +304,8 @@ export function apply(ctx, config = {}) {
   };
 
   // ---- 发送图片到 QQ 私聊（富媒体消息：上传 → msg_type=7）----
-  const sendImageTo = async (target, imagePath, msgId) => {
+  // 官方后端：发图片（上传 → msg_type=7 富媒体）
+  const officialSendImageTo = async (target, imagePath, msgId) => {
     const t = parseTarget(target);
     const buf = readFileSync(imagePath);
     const token = await getAccessToken();
@@ -237,7 +333,8 @@ export function apply(ctx, config = {}) {
 
   // ---- 发送任意文件到 QQ（file_type=4：≤5MB 走 base64 直传，>5MB 走分片上传四步）----
   // 官方文档：{users|groups}/upload_prepare → 分片 PUT 预签名 URL → upload_part_finish → files 合并拿 file_info → msg_type=7
-  const sendFileTo = async (target, filePath, msgId) => {
+  // 官方后端：发任意文件（≤5MB base64 直传，>5MB 分片四步）
+  const officialSendFileTo = async (target, filePath, msgId) => {
     const t = parseTarget(target);
     if (!existsSync(filePath)) throw new Error(`文件不存在: ${filePath}`);
     const st = statSync(filePath);
@@ -349,6 +446,109 @@ export function apply(ctx, config = {}) {
     dlog(`文件已发送(${t.kind}): ${filePath} (${size} B)`);
   };
 
+  // ================= OneBot v11 后端（NapCat / SnowLuma / LLOneBot 等）=================
+  // [2026-10-26 by 大肥鱼] 新增第二个后端，与官方机器人后端并存，靠下面的同名分派器切换。
+  // 设计要点：
+  //   1. 只依赖 OneBot v11 标准（HTTP API + HTTP 上报，可选正向 WS），不绑定任何具体实现；
+  //   2. 收消息侧：OneBot 事件先归一成「伪官方事件」，再交给 onIncomingMessage ——
+  //      会话映射、主人识别、附件下载、agent 懒加载、分派回复全部沿用官方那套，不重写；
+  //   3. 发送侧：target 语义与官方一致（私聊 "<QQ号>"、群 "group:<群号>"），调用点无需感知后端。
+  // OneBot 端需要开启的 HTTP API：send_private_msg / send_group_msg /
+  //   upload_group_file / upload_private_file / get_login_info。
+  let obBase = String(obCfg.apiBase || "").replace(/\/+$/, "");
+
+  // 调 OneBot HTTP API（统一超时与错误；个别实现把错误塞在 body.retcode 里）
+  const obApi = async (action, payload = {}, timeoutMs = 30000) => {
+    const ctl = new AbortController();
+    const tm = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${obBase}/${action}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(obCfg.accessToken ? { Authorization: `Bearer ${obCfg.accessToken}` } : {}),
+        },
+        body: JSON.stringify(payload),
+        signal: ctl.signal,
+      });
+      const txt = await res.text();
+      if (!res.ok) throw new Error(`${action} HTTP ${res.status}: ${txt.slice(0, 300)}`);
+      let j = null;
+      try { j = txt ? JSON.parse(txt) : null; } catch { j = null; }
+      if (j && typeof j.retcode === "number" && j.retcode !== 0 && j.status !== "ok") {
+        throw new Error(`${action} retcode=${j.retcode} ${String(j.message ?? j.wording ?? "").slice(0, 200)}`);
+      }
+      return j ?? {};
+    } finally { clearTimeout(tm); }
+  };
+
+  // 自己发出去的消息 id 集合：用来识别「别人引用我的话」——群里不带 @ 也算在跟我说话，
+  // 否则 atOnly=true 时只要对方点了「回复」而不是 @，消息就被无视了。
+  const obSentIds = new Set();
+  const obRememberSent = (r) => {
+    const id = r?.data?.message_id;
+    if (id == null) return;
+    obSentIds.add(String(id));
+    if (obSentIds.size > 300) obSentIds.delete(obSentIds.values().next().value);
+  };
+
+  const obTarget = (target) => {
+    const t = parseTarget(target);
+    return t.kind === "group"
+      ? { kind: "group", id: t.id, action: "send_group_msg", key: "group_id" }
+      : { kind: "user", id: t.id, action: "send_private_msg", key: "user_id" };
+  };
+  // OneBot 的数字 id 用 number 更兼容（字符串也行，但部分是强类型实现）
+  const obId = (v) => (/^\d+$/.test(String(v)) ? Number(v) : v);
+
+  // 文本：有 msgId（原消息 message_id）就带 reply 段做引用回复——群里看起来就像在回那个人，
+  // 不需要知道对方的 QQ 号，也不会像纯文字那样插进一堆消息中间找不着上下文。
+  const obSendText = async (target, text, msgId) => {
+    const t = obTarget(target);
+    const rid = msgId == null ? "" : String(msgId).trim();
+    const quoted = /^-?\d+$/.test(rid);
+    const segs = [];
+    if (quoted) segs.push({ type: "reply", data: { id: rid } });
+    segs.push({ type: "text", data: { text: String(text ?? "") } });
+    await obApi(t.action, { [t.key]: obId(t.id), message: segs }).then(obRememberSent);
+    dlog(`onebot 文本已发送(${t.kind} ${t.id})${quoted ? ` 引用#${rid}` : ""}`);
+  };
+
+  // 图片走 base64 直传：不依赖 OneBot 端能否读到本机路径
+  const obSendImageTo = async (target, imagePath) => {
+    if (!existsSync(imagePath)) throw new Error(`图片不存在: ${imagePath}`);
+    const t = obTarget(target);
+    const buf = readFileSync(imagePath);
+    await obApi(t.action, {
+      [t.key]: obId(t.id),
+      message: [{ type: "image", data: { file: `base64://${buf.toString("base64")}` } }],
+    }).then(obRememberSent);
+    dlog(`onebot 图片已发送(${t.kind} ${t.id}): ${imagePath} (${buf.length} B)`);
+  };
+
+  // 文件：群 upload_group_file / 私聊 upload_private_file，传绝对路径由 OneBot 端自己读
+  const obSendFileTo = async (target, filePath) => {
+    if (!existsSync(filePath)) throw new Error(`文件不存在: ${filePath}`);
+    const st = statSync(filePath);
+    if (!st.isFile()) throw new Error(`不是普通文件: ${filePath}`);
+    const t = obTarget(target);
+    const name = basename(filePath);
+    if (t.kind === "group") {
+      await obApi("upload_group_file", { group_id: obId(t.id), file: filePath, name }, 300000);
+    } else {
+      await obApi("upload_private_file", { user_id: obId(t.id), file: filePath, name }, 300000);
+    }
+    dlog(`onebot 文件已发送(${t.kind} ${t.id}): ${filePath} (${st.size} B)`);
+  };
+
+  // ---- 发送统一入口：三个调用名与官方完全一致，调用点不用改 ----
+  const sendText = async (target, text, msgId) =>
+    backend === "onebot" ? obSendText(target, text, msgId) : officialSendText(target, text, msgId);
+  const sendImageTo = async (target, imagePath, msgId) =>
+    backend === "onebot" ? obSendImageTo(target, imagePath) : officialSendImageTo(target, imagePath, msgId);
+  const sendFileTo = async (target, filePath, msgId) =>
+    backend === "onebot" ? obSendFileTo(target, filePath) : officialSendFileTo(target, filePath, msgId);
+
   // ---- 下载 QQ 图片附件到 agent 工作目录（纯文本模型也能通过文件工具处理）----
   const IMAGE_EXT = {
     "image/png": ".png",
@@ -385,7 +585,7 @@ export function apply(ctx, config = {}) {
   };
   const isImageCt = (ct) => String(ct || "").startsWith("image/");
   const downloadImages = async (attachments, msgId, prefix = "qq") => {
-    const cwd = config.cwd || DEFAULT_CWD;
+    const cwd = config.cwd || "C:\\Users\\13941\\.deepseek harness";
     const inbox = join(cwd, "inbox");
     const out = { saved: [], failed: 0 };
     for (let i = 0; i < attachments.length; i++) {
@@ -425,11 +625,17 @@ export function apply(ctx, config = {}) {
               // [patch 2026-10-19 by 大肥鱼] 带鉴权头优先。
               // QQ 富媒体 URL 对无鉴权请求常先挂起十几秒才回（10-19 实测单图 19s），
               // 原来的「先裸请求、失败了再带 token」等于每张图白等一整轮。
-              const token = await getAccessToken();
-              let r = await fetchOnce(u, { Authorization: `QQBot ${token}` }, 30_000);
-              if (!r.ok) {
-                // 兜底：少数 URL 是公开的，带 token 被拒就裸试一次（最坏与旧逻辑等价）
+              // [2026-10-26] onebot 后端：图片是普通公网 URL，不带 QQBot 头，也不碰官方 token。
+              let r;
+              if (backend === "onebot") {
                 r = await fetchOnce(u, null, 30_000);
+              } else {
+                const token = await getAccessToken();
+                r = await fetchOnce(u, { Authorization: `QQBot ${token}` }, 30_000);
+                if (!r.ok) {
+                  // 兜底：少数 URL 是公开的，带 token 被拒就裸试一次（最坏与旧逻辑等价）
+                  r = await fetchOnce(u, null, 30_000);
+                }
               }
               if (r.ok) {
                 dlog(`附件响应 ${r.status} 耗时 ${Date.now() - t0}ms host=${hostOf(u)}`);
@@ -479,11 +685,11 @@ export function apply(ctx, config = {}) {
         .join("");
       if (typeof turn !== "number") return;
       if (p) {
-        p.turns.set(turn, text);
+        p.turns.set(turn, (p.turns.get(turn) ?? "") + text); // [fix 2026-10-26] 累加而非覆盖：同轮多段输出不再互相盖掉
       } else {
         let m = orphanTurns.get(sid);
         if (!m) { m = new Map(); orphanTurns.set(sid, m); }
-        m.set(turn, text);
+        m.set(turn, (m.get(turn) ?? "") + text); // [fix 2026-10-26] 同上
       }
       return;
     }
@@ -509,7 +715,7 @@ export function apply(ctx, config = {}) {
     const openid = openidForSession(sid);
     if (!openid) return;
     dlog(`自动转发到 QQ（turn=${turn}）: ${text.slice(0, 40)}`);
-    sendText(openid, text, undefined);
+    sendText(openid, text, undefined).catch((e) => dlog(`自动转发失败: ${e?.message ?? e}`));
   });
 
   // 群会话工具面白名单（2026-10-14）：群里只给联网工具，别的都不给。
@@ -544,6 +750,19 @@ export function apply(ctx, config = {}) {
       );
     }
     return ready;
+  };
+
+  // [2026-10-26] 会话预设解析：config.preset 指定则所有 QQ 会话统一用它；否则沿用「群 qqgroup、私聊默认」
+  const presetFor = async (key) => {
+    const want = presetValue;
+    if (want) {
+      if (want === "qqgroup" && !(await hasQqgroupPreset())) return {};
+      dlog(`[preset] 按配置使用 ${want}（key=${String(key).slice(0, 16)}）`);
+      return { agentPreset: want };
+    }
+    return String(key).startsWith("group:") && (await hasQqgroupPreset())
+      ? { agentPreset: "qqgroup" }
+      : {};
   };
 
   // ---- 获取或创建该 key 的 agent（懒加载；重启后 resume 恢复历史）----
@@ -590,7 +809,8 @@ export function apply(ctx, config = {}) {
       openidToSession[`${openid}#prev`] = mappedId;
       saveMap(openidToSession);
       dlog(`会话迁移: ${mappedId} → ${fixedId}（旧会话保留为 prev）`);
-      sendText(openid, `[系统提示] QQ 会话已固定为 ${fixedId}，旧会话（${mappedId.slice(0, 8)}…）保留存档。`, undefined);
+      sendText(openid, `[系统提示] QQ 会话已固定为 ${fixedId}，旧会话（${mappedId.slice(0, 8)}…）保留存档。`, undefined)
+        .catch((e) => dlog(`系统提示发送失败: ${e?.message ?? e}`));
     }
     let sessionId = fixedId;
     let handle;
@@ -607,11 +827,9 @@ export function apply(ctx, config = {}) {
       handle = await ctx.agents.create({
         sessionId: SessionId(sessionId),
         meta: {
-          cwd: config.cwd || DEFAULT_CWD,
-          // 群会话挂 qqgroup 预设（只聊天、不碰本机）；私聊不指定 → 用默认 dafeiyu
-          ...(String(openid).startsWith("group:") && (await hasQqgroupPreset())
-            ? { agentPreset: "qqgroup" }
-            : {}),
+          cwd: config.cwd || "C:\\Users\\13941\\.deepseek harness",
+          // 预设：config.preset 指定则统一用它；否则群 qqgroup、私聊默认 dafeiyu
+          ...(await presetFor(openid)),
         },
         agentOptions,
         setup,
@@ -621,7 +839,8 @@ export function apply(ctx, config = {}) {
       saveMap(openidToSession);
       if (prevSessionId && prevSessionId !== sessionId) {
         dlog(`已为 ${openid} 新建固定会话 ${sessionId}（旧会话 ${prevSessionId} 保留）`);
-        sendText(openid, `[系统提示] 上次会话恢复失败，已开启新会话。旧会话（${prevSessionId.slice(0, 8)}…）的上下文不再自动带出。`, undefined);
+        sendText(openid, `[系统提示] 上次会话恢复失败，已开启新会话。旧会话（${prevSessionId.slice(0, 8)}…）的上下文不再自动带出。`, undefined)
+          .catch((e) => dlog(`系统提示发送失败: ${e?.message ?? e}`));
       } else {
         dlog(`已为 ${openid} 创建固定会话 ${sessionId}`);
       }
@@ -631,7 +850,30 @@ export function apply(ctx, config = {}) {
   };
 
   // ---- 消息入口（私聊 C2C + 群 @），文本 + 图片附件 ----
+  // [2026-10-26 去重修复] 同一事件可能被多条并存连接重复投递（实测同一条 2–60ms 内到 3 次）：
+  // 有消息 id 按 id 去重，没有 id 才退化成「内容+附件数」窗口兜底。
+  const seenEventKeys = new Map();
+  const isDuplicateEvent = (kind, msg) => {
+    const now = Date.now();
+    for (const [k, t] of seenEventKeys) if (now - t > 60_000) seenEventKeys.delete(k);
+    const author = msg?.author ?? {};
+    const peer = kind === "group"
+      ? (msg?.group_openid ?? msg?.group_id)
+      : (author.user_openid ?? author.id);
+    const id = msg?.id ?? msg?.message_id;
+    const key = id
+      ? kind + "|" + peer + "|id:" + id
+      : kind + "|" + peer + "|c:" + String(msg?.content ?? "").slice(0, 200) + "|n:" + (Array.isArray(msg?.attachments) ? msg.attachments.length : 0);
+    if (seenEventKeys.has(key)) return true;
+    seenEventKeys.set(key, now);
+    return false;
+  };
+
   const onIncomingMessage = async (kind, msg) => {
+    if (isDuplicateEvent(kind, msg)) {
+      dlog("[dedup] " + kind + " 重复事件已丢弃 id=" + (msg?.id ?? msg?.message_id ?? "none"));
+      return;
+    }
     const isGroup = kind === "group";
     const author = msg?.author ?? {};
     const peerId = isGroup
@@ -653,12 +895,22 @@ export function apply(ctx, config = {}) {
     const msgId = msg?.id;
     const attachments = Array.isArray(msg?.attachments) ? msg.attachments : [];
     if (!content && attachments.length === 0) return;
-    const images = await downloadImages(attachments, msgId, isGroup ? "qqg" : "qq");
+    // [2026-10-26] OneBot 的图片可能已经落在本机（localPath），不必再下载；只下 URL 那部分
+    const localOnes = attachments.filter((a) => a && a.localPath);
+    const remoteOnes = attachments.filter((a) => a && !a.localPath);
+    const images = await downloadImages(remoteOnes, msgId, isGroup ? "qqg" : "qq");
+    for (const a of localOnes) images.saved.push(a.localPath);
     // 认主人：群消息靠指纹比对；私聊则视为主人并顺手学习指纹
     let fromOwner = false;
     if (isGroup) {
       fromOwner = isOwnerAuthor(author);
-    } else if (config.ownerOpenids.length === 0 || config.ownerOpenids.includes(String(peerId))) {
+    } else if (
+      backend === "onebot"
+        // [2026-10-26] OneBot 私聊：谁都能聊，但只有白名单里的真 QQ 号算主人。
+        // openid 那套在 OneBot 下不存在，硬套等于把每个私聊的人都当主人。
+        ? (obCfg.ownerUsers.includes(String(peerId)) || config.ownerOpenids.includes(String(peerId)))
+        : config.ownerOpenids.length === 0 || config.ownerOpenids.includes(String(peerId))
+    ) {
       rememberOwnerAuthor(author);
       fromOwner = true;
     }
@@ -677,7 +929,7 @@ export function apply(ctx, config = {}) {
       const sid = agent.id;
       if (!pending.has(sid)) pending.set(sid, { turns: new Map(), reply: null });
       const p = pending.get(sid);
-      p.reply = (t) => sendText(target, t, msgId);
+      p.reply = (t) => sendText(target, t, msgId).catch((e) => dlog(`回复发送失败: ${e?.message ?? e}`));
       agent.followup(createUserMessage({
         content: [{ type: "text", text }],
         source: { kind: "user" },
@@ -686,11 +938,16 @@ export function apply(ctx, config = {}) {
       const stack = e?.stack ?? String(e);
       ctx.logger.error(`[qq-bot] 处理失败: ${stack}`);
       dlog(`处理失败: ${stack}`);
-      sendText(target, `出错了：${e?.message ?? e}`, msgId);
+      // 不把内部错误原文丢进群里（会泄露栈/服务名），只给一句轻的提示
+      sendText(target, "我这边卡了一下，等下再试", msgId).catch(() => { /* 连报错都发不出去就算了 */ });
     }
   };
-  const onC2CMessage = (msg) => onIncomingMessage("c2c", msg);
-  const onGroupMessage = (msg) => onIncomingMessage("group", msg);
+  // 2026-10-26: fire-and-forget 入口必须兜住 —— 13:29 就是因为一次未处理的
+  // unhandledRejection 把整个 dsh 进程带走（sendText is not defined）。
+  const onC2CMessage = (msg) =>
+    onIncomingMessage("c2c", msg).catch((e) => dlog(`c2c 消息处理异常（已兜住）: ${e?.stack ?? e}`));
+  const onGroupMessage = (msg) =>
+    onIncomingMessage("group", msg).catch((e) => dlog(`群消息处理异常（已兜住）: ${e?.stack ?? e}`));
 
   // ---- WebSocket 网关（原生实现 + 断线重连 + 心跳）----
   let ws = null;
@@ -716,6 +973,12 @@ export function apply(ctx, config = {}) {
       if (!url) throw new Error("gateway 未返回 wss url");
       dlog(`连接网关 ${url}`);
 
+      // [2026-10-26 去重修复] 重连前先彻底关掉旧连接：旧 ws 的 onmessage 不置空就会继续投递，
+      // 一次 4009 断线重连就留下两条并存的连接，同一条消息被处理 N 次（实测 3 次）。
+      if (ws) {
+        try { ws.onmessage = null; ws.onclose = null; ws.onerror = null; ws.close(); } catch {}
+        ws = null;
+      }
       ws = new WebSocket(url);
       ws.onopen = () => {
         ws.send(JSON.stringify({
@@ -766,7 +1029,390 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  connectGateway();
+  // ================= OneBot 事件来源（归一成伪官方事件后交给 onIncomingMessage）=================
+  // 需要过滤：①自己发的消息（防回环）②meta_event/心跳 ③群里没 @ 机器人（atOnly）
+  const obSelfId = String(obCfg.selfId || "");
+  const obLastReplyAt = new Map(); // 群号 -> 上次接话时间戳（没 @ 时的冷却用）
+  const obIsSelf = (ev) => !!obSelfId && String(ev?.user_id ?? ev?.sender?.user_id ?? "") === obSelfId;
+
+  // OneBot 的 file 字段 → 本机可读路径（只认确实存在的文件）
+  const obResolveLocal = (file) => {
+    if (!file) return null;
+    try {
+      let p = String(file);
+      if (p.startsWith("base64://")) return null;
+      if (p.startsWith("file://")) p = decodeURIComponent(p.slice(7).replace(/^\/+/, ""));
+      if (/^[a-zA-Z]:[\\/]/.test(p) && existsSync(p)) return p;
+      return null;
+    } catch { return null; }
+  };
+
+  // 解析 OneBot 的 message 段数组：纯文本 / 图片附件 / 是否 @ 了自己
+  const obParseMessage = (raw, message) => {
+    const segs = Array.isArray(message) ? message : [];
+    const texts = [];
+    const attachments = [];
+    let atSelf = false;
+    for (const s of segs) {
+      const type = s?.type;
+      const data = s?.data ?? {};
+      if (type === "text") {
+        texts.push(String(data.text ?? ""));
+      } else if (type === "at") {
+        if (obSelfId && String(data.qq) === obSelfId) atSelf = true;
+        else if (data.qq && String(data.qq) !== "all") texts.push(`@${data.qq} `);
+      } else if (type === "image") {
+        const url = String(data.url ?? "").trim();
+        const local = obResolveLocal(data.file);
+        if (local) attachments.push({ localPath: local, content_type: "image/*" });
+        else if (url) attachments.push({ url, content_type: "image/*" });
+      } else if (type === "file") {
+        const url = String(data.url ?? "").trim();
+        if (url) attachments.push({ url, filename: String(data.name ?? data.file ?? ""), content_type: "" });
+      } else if (type === "reply") {
+        // 有人点「回复」引用我的消息：即使没 @ 也算在跟我说话（atOnly 时尤其重要）
+        if (obSentIds.has(String(data.id ?? ""))) atSelf = true;
+      }
+      // face / mface / record / video / forward 等段忽略：不影响文本语义
+    }
+    if (texts.length === 0 && typeof raw === "string" && raw) {
+      const plain = raw.replace(/\[CQ:[^\]]*\]/g, "").trim();
+      if (plain) texts.push(plain);
+    }
+    return { text: texts.join("").replace(/<@!?\d+>/g, "").trim(), attachments, atSelf };
+  };
+
+  // 归一成「伪官方事件」，直接复用 onIncomingMessage 的下游逻辑（会话映射/主人识别/回发…）
+  const obDispatch = (ev) => {
+    try {
+      if (!ev || typeof ev !== "object") return;
+      if (ev.post_type !== "message" && ev.post_type !== "message_sent") return;
+      if (obIsSelf(ev)) return;
+      // 同一 message_id 只处理一次（跨实例共享表：既防协议端重复投递，也防热重载后新旧实例各回一次）
+      {
+        const key = String(ev.message_id ?? "");
+        if (key) {
+          const seen = (globalThis.__dshQqbotSeen ||= new Map());
+          const now = Date.now();
+          for (const [k, t] of seen) if (now - t > 60_000) seen.delete(k);
+          if (seen.has(key)) {
+            dlog(`onebot 重复事件已忽略 id=${key}`);
+            return;
+          }
+          seen.set(key, now);
+        }
+      }
+      const isGroup = ev.message_type === "group";
+      const parsed = obParseMessage(ev.raw_message, ev.message);
+      const senderId = String(ev.user_id ?? ev.sender?.user_id ?? "");
+      if (!senderId) return;
+      // 群门槛：@ 我、或引用我的消息 → 必接
+      // 没 @ 我时：只在文本命中关键词（默认「肥鱼」）时才接；groupCooldownSec 仅是防连发的兜底（0 = 不冷却）
+      if (isGroup && !parsed.atSelf) {
+        if (obCfg.atOnly) return;
+        const kws = Array.isArray(obCfg.groupKeywords) ? obCfg.groupKeywords.filter(Boolean) : [];
+        const plain = (parsed.text || "").toLowerCase();
+        const hit = kws.length > 0 ? kws.some((k) => plain.includes(String(k).toLowerCase())) : !!parsed.text;
+        if (!hit) {
+          dlog(`onebot 群${ev.group_id} 未命中关键词，跳过: ${(parsed.text || "").slice(0, 30)}`);
+          return;
+        }
+        const cd = Math.max(0, Number(obCfg.groupCooldownSec ?? 0));
+        if (cd > 0) {
+          const gk = String(ev.group_id ?? "");
+          const left = cd * 1000 - (Date.now() - (obLastReplyAt.get(gk) ?? 0));
+          if (left > 0) {
+            dlog(`onebot 群${gk} 冷却中，跳过（还剩 ${Math.ceil(left / 1000)}s）`);
+            return;
+          }
+        }
+      }
+      const senderName = String(ev.sender?.card || ev.sender?.nickname || "");
+      const pseudo = isGroup
+        ? {
+            group_openid: String(ev.group_id ?? ""),
+            author: {
+              member_openid: senderId,
+              username: senderName,
+              member_role: ev.sender?.role === "owner" ? "owner" : (ev.sender?.role ?? ""),
+            },
+            content: parsed.text,
+            attachments: parsed.attachments,
+            id: String(ev.message_id ?? ""),
+          }
+        : {
+            author: { user_openid: senderId, union_openid: senderId, username: senderName },
+            content: parsed.text,
+            attachments: parsed.attachments,
+            id: String(ev.message_id ?? ""),
+          };
+      dlog(
+        `onebot 收到${isGroup ? "群聊" : "私聊"} ${isGroup ? `群${ev.group_id}` : senderId}` +
+        `${senderName ? `(${senderName})` : ""}: ${parsed.text.slice(0, 60)}` +
+        `${parsed.attachments.length ? ` [附件x${parsed.attachments.length}]` : ""}`,
+      );
+      // 空文本时打一份原始事件，便于查协议端到底推了什么
+      if (!parsed.text) {
+        dlog(`onebot 空正文 type=${ev.message_type} msgType=${typeof ev.message} len=${Array.isArray(ev.message) ? ev.message.length : -1}: ${JSON.stringify(ev).slice(0, 500)}`);
+      }
+      if (isGroup) obLastReplyAt.set(String(ev.group_id ?? ""), Date.now());
+      onIncomingMessage(isGroup ? "group" : "c2c", pseudo);
+    } catch (e) {
+      dlog(`onebot 事件处理失败: ${e?.stack ?? e}`);
+    }
+  };
+
+  // ---- 事件来源 A：本地 HTTP 上报服务（把 OneBot 的「HTTP 上报」指到这里）----
+  let obServer = null;
+  const obStartHttp = async () => {
+    const { createServer } = await import("node:http");
+    const { createHmac, timingSafeEqual } = await import("node:crypto");
+    const wantPath = String(obCfg.listenPath || "/onebot");
+    obServer = createServer((req, res) => {
+      if (req.method !== "POST" || String(req.url || "").split("?")[0] !== wantPath) {
+        res.writeHead(404).end("not found");
+        return;
+      }
+      const chunks = [];
+      req.on("data", (c) => { if (c) chunks.push(c); });
+      req.on("end", () => {
+        const body = Buffer.concat(chunks);
+        // 签名校验（OneBot 标准头：X-Signature: sha1=<hmac_sha1(secret, rawBody)>）
+        if (obCfg.secret) {
+          const got = String(req.headers["x-signature"] ?? "");
+          const want = "sha1=" + createHmac("sha1", obCfg.secret).update(body).digest("hex");
+          let ok = false;
+          try {
+            const a = Buffer.from(got);
+            const b = Buffer.from(want);
+            ok = a.length === b.length && timingSafeEqual(a, b);
+          } catch { ok = false; }
+          if (!ok) {
+            dlog("onebot 上报签名校验失败，已丢弃");
+            res.writeHead(401).end("bad signature");
+            return;
+          }
+        }
+        let ev = null;
+        try { ev = JSON.parse(body.toString("utf8")); } catch { ev = null; }
+        res.writeHead(204).end(); // 先回 204，OneBot 不等处理结果
+        if (ev) obDispatch(ev);
+      });
+    });
+    obServer.on("error", (e) => dlog(`onebot 上报服务出错: ${e?.message ?? e}`));
+    await new Promise((resolve, reject) => {
+      obServer.once("error", reject);
+      obServer.listen(Number(obCfg.listenPort), String(obCfg.listenHost), () => resolve());
+    });
+    dlog(`onebot 事件服务已监听 http://${obCfg.listenHost}:${obCfg.listenPort}${wantPath}（把 OneBot 的 HTTP 上报指到这里）`);
+  };
+
+  // ---- 事件来源 B：主动连 OneBot 的正向 WebSocket（events=ws）----
+  let obWs = null;
+  let obWsTimer = null;
+  const obWsUrl = () => {
+    if (obCfg.wsUrl) return String(obCfg.wsUrl);
+    try {
+      const u = new URL(obBase);
+      const port = Number(u.port || 3000) + 1; // 常见约定：API 3000 / 事件 3001
+      return `${u.protocol === "https:" ? "wss" : "ws"}://${u.hostname}:${port}`;
+    } catch { return "ws://127.0.0.1:3001"; }
+  };
+  const obConnectWs = () => {
+    if (closed) return;
+    // Node 内置 WebSocket 不支持自定义头，token 走 query（OneBot 标准支持 ?access_token=）
+    const base = obWsUrl();
+    const wsTok = obCfg.wsToken || obCfg.accessToken;
+    const url = wsTok
+      ? `${base}${base.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(wsTok)}`
+      : base;
+    // 防多实例：热重载后旧实例的 WS 可能还连着，SnowLuma 会向所有连接广播同一事件（导致一条消息回两次）
+    try {
+      const prev = globalThis.__dshQqbotObWs;
+      if (prev && prev !== obWs && typeof prev.close === "function") {
+        prev.close();
+        dlog("onebot 已关闭上一个实例遗留的 WS");
+      }
+    } catch { /* ignore */ }
+    try {
+      obWs = new WebSocket(url);
+    } catch (e) {
+      dlog(`onebot WS 构造失败: ${e?.message ?? e}`);
+      obWsTimer = setTimeout(obConnectWs, 15_000);
+      return;
+    }
+    obWs.onopen = () => {
+      globalThis.__dshQqbotObWs = obWs;
+      dlog(`onebot WS 已连接 ${base}`);
+    };
+    obWs.onmessage = (m) => {
+      let ev = null;
+      try { ev = JSON.parse(String(m.data)); } catch { return; }
+      obDispatch(ev);
+    };
+    obWs.onclose = (e) => {
+      dlog(`onebot WS 断开 (code=${e?.code})，15 秒后重连`);
+      if (!closed) obWsTimer = setTimeout(obConnectWs, 15_000);
+    };
+    obWs.onerror = (e) => dlog(`onebot WS 错误: ${e?.message ?? String(e)}`);
+  };
+
+  // ---- 后端启动/停止（抽成函数，供热切换复用）----
+  const stopBackend = () => {
+    if (obWsTimer) { clearTimeout(obWsTimer); obWsTimer = null; }
+    try { if (obWs) obWs.close(); } catch { /* ignore */ }
+    if (globalThis.__dshQqbotObWs === obWs) delete globalThis.__dshQqbotObWs;
+    obWs = null;
+    try { if (obServer) obServer.close(); } catch { /* ignore */ }
+    obServer = null;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    try { if (ws) ws.close(); } catch { /* ignore */ }
+    ws = null;
+  };
+  const startBackend = () => {
+    if (closed) return;
+    if (backend === "onebot") {
+      if (obCfg.events === "ws") obConnectWs();
+      else obStartHttp().catch((e) => dlog(`onebot 事件服务启动失败: ${e?.stack ?? e}`));
+      // 探一次登录态，日志里留个记录，便于判断后端是否真的活着
+      setTimeout(async () => {
+        try {
+          const info = await obApi("get_login_info", {}, 8000);
+          dlog(`onebot get_login_info: ${JSON.stringify(info?.data ?? info).slice(0, 200)}`);
+        } catch (e) {
+          dlog(`onebot get_login_info 失败（后端没起 / 没配 accessToken）: ${e?.message ?? e}`);
+        }
+      }, 1500);
+    } else {
+      connectGateway();
+    }
+  };
+
+  // ---- 运行时配置热读：每 3 秒 stat 一次，变了就热应用 ----
+  const connSig = () => JSON.stringify([
+    backend, obCfg.apiBase, obCfg.accessToken, obCfg.wsToken, obCfg.wsUrl, obCfg.selfId,
+    obCfg.events, obCfg.listenHost, obCfg.listenPort, obCfg.listenPath, obCfg.secret,
+  ]);
+  const applyRuntime = (raw) => {
+    if (!raw || typeof raw !== "object") return;
+    const before = connSig();
+    if (raw.backend === "official" || raw.backend === "onebot") backend = raw.backend;
+    if (raw.preset !== undefined) presetValue = String(raw.preset ?? "").trim();
+    if (raw.onebot && typeof raw.onebot === "object") obCfg = { ...obCfg, ...raw.onebot };
+    obBase = String(obCfg.apiBase || "").replace(/\/+$/, "");
+    const after = connSig();
+    if (after !== before) {
+      dlog(`运行时配置: 后端参数变化 -> 重连 (backend=${backend} events=${obCfg.events})`);
+      stopBackend();
+      setTimeout(startBackend, 400);
+    } else {
+      dlog(`运行时配置已应用 (backend=${backend} atOnly=${obCfg.atOnly} kw=${(obCfg.groupKeywords || []).join("/")} cd=${obCfg.groupCooldownSec} preset=${presetValue || "-"})`);
+    }
+  };
+  const checkRuntime = () => {
+    if (closed || !runtimeFile) return;
+    try {
+      if (!existsSync(runtimeFile)) {
+        if (!runtimeMissingWarned) {
+          dlog(`运行时配置未创建（可选，改它免重启）: ${runtimeFile}`);
+          runtimeMissingWarned = true;
+        }
+        return;
+      }
+      const st = statSync(runtimeFile);
+      const stamp = `${st.mtimeMs}:${st.size}`;
+      if (stamp === runtimeStamp) return;
+      runtimeStamp = stamp;
+      let obj = null;
+      try {
+        obj = JSON.parse(readFileSync(runtimeFile, "utf8"));
+      } catch (e) {
+        dlog(`运行时配置 JSON 解析失败，本次忽略: ${e?.message ?? e}`);
+        return;
+      }
+      dlog(`检测到运行时配置变更: ${runtimeFile}`);
+      applyRuntime(obj);
+    } catch (e) {
+      dlog(`运行时配置读取失败: ${e?.message ?? e}`);
+    }
+  };
+
+  // ---- 设置页（本机 HTTP，给 DSH 设置页里的 iframe 用）----
+  // [2026-10-26 by 大肥鱼] 只读写 runtime-config.json，不碰 patch；写盘后由 3 秒热读生效。
+  let settingsServer = null;
+  const settingsPort = config.settingsPort ?? 3211;
+  const startSettingsServer = async () => {
+    if (settingsServer) return;
+    try {
+      const { createServer } = await import("node:http");
+      const pageFile = join(fileURLToPath(new URL(".", import.meta.url)), "settings-page.html");
+      settingsServer = createServer((req, res) => {
+        const cors = {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET,PUT,OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Cache-Control": "no-store",
+        };
+        const send = (code, type, body) => {
+          res.writeHead(code, { "Content-Type": type, ...cors });
+          res.end(body);
+        };
+        let pathname = "/";
+        try { pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname; } catch { /* ignore */ }
+        if (req.method === "OPTIONS") return send(204, "text/plain", "");
+        if (pathname === "/" || pathname === "/settings") {
+          try {
+            return send(200, "text/html; charset=utf-8", readFileSync(pageFile));
+          } catch (e) {
+            return send(500, "text/plain; charset=utf-8", "settings-page.html 读不到: " + (e?.message ?? e));
+          }
+        }
+        if (pathname === "/api/config" && req.method === "GET") {
+          try {
+            const st = statSync(runtimeFile);
+            const j = JSON.parse(readFileSync(runtimeFile, "utf8"));
+            j.__mtime = new Date(st.mtimeMs).toLocaleString("zh-CN");
+            j.__file = runtimeFile;
+            return send(200, "application/json; charset=utf-8", JSON.stringify(j));
+          } catch (e) {
+            return send(500, "application/json; charset=utf-8", JSON.stringify({ error: e?.message ?? String(e) }));
+          }
+        }
+        if (pathname === "/api/config" && req.method === "PUT") {
+          let buf = "";
+          req.on("data", (c) => { buf += c; if (buf.length > 262144) req.destroy(); });
+          req.on("end", () => {
+            try {
+              const j = JSON.parse(buf);
+              delete j.__mtime;
+              delete j.__file;
+              if (j.backend !== "official" && j.backend !== "onebot") throw new Error("backend 只能是 official 或 onebot");
+              if (j.preset != null && typeof j.preset !== "string") throw new Error("preset 必须是字符串");
+              if (j.onebot != null && (typeof j.onebot !== "object" || Array.isArray(j.onebot))) throw new Error("onebot 必须是对象");
+              writeFileSync(runtimeFile, JSON.stringify(j, null, 2) + "\n", "utf8");
+              dlog("设置页写入 runtime-config.json，等 3 秒热应用");
+              send(200, "application/json; charset=utf-8", JSON.stringify({ ok: true }));
+            } catch (e) {
+              send(400, "application/json; charset=utf-8", JSON.stringify({ error: e?.message ?? String(e) }));
+            }
+          });
+          return;
+        }
+        return send(404, "text/plain; charset=utf-8", "not found");
+      });
+      settingsServer.on("error", (e) => {
+        dlog("设置页服务出错: " + (e?.message ?? e));
+        settingsServer = null;
+      });
+      settingsServer.listen(settingsPort, "127.0.0.1", () => dlog("设置页已启动 http://127.0.0.1:" + settingsPort));
+    } catch (e) {
+      dlog("设置页服务启动失败: " + (e?.message ?? e));
+    }
+  };
+  startBackend();
+  checkRuntime();
+  runtimeTimer = setInterval(checkRuntime, 3000);
+  startSettingsServer();
 
   // ---- 工具：QQ 发图（qq-send-image）----
   ctx.tools.register(defineTool({
@@ -955,10 +1601,16 @@ export function apply(ctx, config = {}) {
   }, 1500);
 
   ctx.on("dispose", () => {
+    if (runtimeTimer) clearInterval(runtimeTimer);
     closed = true;
     stopHeartbeat();
     if (reconnectTimer) clearTimeout(reconnectTimer);
     try { ws?.close(); } catch { /* ignore */ }
-    offEvents();
+    // OneBot 侧清理：上报服务与正向 WS
+    if (obWsTimer) clearTimeout(obWsTimer);
+    try { obWs?.close(); } catch { /* ignore */ }
+    if (globalThis.__dshQqbotObWs === obWs) delete globalThis.__dshQqbotObWs;
+    try { obServer?.close(); } catch { /* ignore */ }
+    try { settingsServer?.close(); } catch { /* ignore */ }    offEvents();
   });
 }

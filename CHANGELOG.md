@@ -1,5 +1,35 @@
 # Changelog
 
+## v3.0.0 (2026-10-26)
+
+### 新增
+- **OneBot v11 后端**：`backend: 'onebot'` 时改走高兼容协议端（NapCat / SnowLuma 实测可用），一套插件两种后端，靠同名分派器 `sendText` / `sendImageTo` / `sendFileTo` 切换，下游调用点零改动
+  - 事件两种来源：正向 WebSocket（插件主动连，15 秒重连）/ HTTP 上报（插件起服务收，支持 `X-Signature` HMAC-SHA1 校验、timingSafeEqual 比较）
+  - 引用回复：发出的消息带 `reply` 段；别人点"回复"引用你的消息也算在跟你说话（`obSentIds` 记账）
+  - 防回环 + 去重：自己发的不处理；同一 `message_id` 60 秒内只处理一次，跨热重载实例共享（`globalThis.__dshQqbotSeen`）
+  - WS 连接接管：新实例连上前先关掉旧实例留下的连接（`globalThis.__dshQqbotObWs`），修掉"热重载后一条消息回两次"
+- **群聊接话策略**：`atOnly`（只回 @）/ `groupKeywords`（关键词触发）/ `groupCooldownSec`（冷却秒数）/ `ownerUsers`（主人白名单），解决全量群消息刷屏
+- **内置设置界面**：插件自带 HTTP 服务（默认 `127.0.0.1:3211`），`GET /` 出配置页、`GET/PUT /api/config` 读写运行时配置，带 CORS；`settings-page.html` 四块表单 + Ctrl+S 保存
+- **运行时热配置**：配置独立成 `runtime-config.json`，插件每 3 秒比对 mtime 后热读；连接参数变了自动停旧连接重启后端，只改策略则原地换值不断线
+
+### 变更
+- `backend` 成为顶层开关，默认 `'official'`，行为与 v2.x 完全一致
+- `appId` / `clientSecret` 改为可选（onebot 后端不需要），official 模式缺凭证时才告警退出
+- 官方发送函数改名为 `officialSendText` / `officialSendImageTo` / `officialSendFileTo`，分派器沿用旧名，兼容原有调用
+- OneBot 模式下主人判定只认 `ownerUsers` 里的真实 QQ 号，**不再认 `member_role="owner"`**（那是群主，不是主人）；私聊同样必须白名单
+- `downloadImages` 在 OneBot 模式下裸取（不带 QQBot 鉴权头）
+- 启动/停止逻辑抽成 `startBackend()` / `stopBackend()`，供热读复用
+
+### 修复
+- 两个 fire-and-forget 入口（`onC2CMessage` / `onGroupMessage`）补 `.catch`，未捕获拒绝不再拖垮 dsh 进程
+- 错误回执不再把内部异常文本发给用户，改为中性提示 + 完整堆栈进日志
+- 五处发送调用补 `.catch`，工具内仍抛出以便 agent 感知失败
+
+### 文档
+- README 中英两份补齐双后端、设置界面、热配置、群聊策略与已知限制
+- `cordis.patch.example.yml` 加 OneBot 与运行时配置模板，全部占位符化
+- `.gitignore` 排除 `runtime-config.json` / `qq-bot-sessions.json` / `inbox/`（含真实 token 与 QQ 号）
+
 ## v2.1.0 (2026-10-19)
 
 ### 新增

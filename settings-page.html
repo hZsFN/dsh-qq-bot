@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QQ Bot 设置</title>
+<style>
+  :root {
+    --bg: #0f1218;
+    --panel: #161b23;
+    --panel2: #1c222c;
+    --line: #252d3a;
+    --text: #e6ebf2;
+    --dim: #8894a6;
+    --dim2: #5d6878;
+    --accent: #4f9dff;
+    --accent-dim: #1e3a5f;
+    --ok: #46c07a;
+    --warn: #e0a84a;
+    --err: #e06060;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.65;
+    padding: 22px 24px 88px;
+  }
+  h1 { font-size: 17px; margin: 0 0 3px; font-weight: 600; letter-spacing: .01em; }
+  .sub { color: var(--dim2); font-size: 11.5px; }
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+  .badges { display: flex; gap: 7px; flex-shrink: 0; padding-top: 2px; }
+  .badge { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--line); color: var(--dim2); white-space: nowrap; }
+  .badge.on { color: var(--ok); border-color: #24513a; background: #12241a; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 12px; }
+  .card.dim { opacity: .55; }
+  .ct { font-size: 12px; font-weight: 600; color: var(--accent); letter-spacing: .1em; text-transform: uppercase; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .ct::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .row { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
+  .row + .row { border-top: 1px solid #1b222c; }
+  .lbl { width: 132px; flex-shrink: 0; color: var(--dim); font-size: 12.5px; }
+  .hint { color: var(--dim2); font-size: 11px; margin-left: 6px; font-weight: 400; }
+  input[type=text], input[type=password], input[type=number], select {
+    flex: 1; min-width: 0; background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 6px; color: var(--text); padding: 6px 9px; font-size: 12.5px;
+    font-family: inherit; outline: none; transition: border-color .15s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  input::placeholder { color: var(--dim2); }
+  select { cursor: pointer; }
+  .choices { display: flex; gap: 10px; }
+  .choice {
+    flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px;
+    cursor: pointer; background: var(--panel2); transition: border-color .15s, background .15s;
+  }
+  .choice:hover { border-color: #33415a; }
+  .choice.on { border-color: var(--accent); background: var(--accent-dim); }
+  .choice b { display: block; font-size: 13px; margin-bottom: 2px; }
+  .choice span { color: var(--dim2); font-size: 11px; }
+  .choice.on span { color: #a9c6e8; }
+  .sw { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+  .sw input { display: none; }
+  .track { width: 38px; height: 21px; border-radius: 20px; background: #2a3340; position: relative; transition: background .18s; flex-shrink: 0; }
+  .track::after { content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px; border-radius: 50%; background: #7a8798; transition: transform .18s, background .18s; }
+  .sw input:checked + .track { background: var(--accent-dim); }
+  .sw input:checked + .track::after { transform: translateX(17px); background: var(--accent); }
+  .swtxt { color: var(--dim); font-size: 12px; }
+  .foot {
+    position: fixed; left: 0; right: 0; bottom: 0; padding: 13px 24px;
+    background: linear-gradient(to top, var(--bg) 62%, transparent);
+    display: flex; align-items: center; gap: 11px;
+  }
+  button {
+    font-family: inherit; font-size: 12.5px; padding: 7px 17px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+    cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  button:hover { border-color: #3b4a63; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #04121f; font-weight: 600; }
+  button.primary:hover { background: #63aaff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { margin-left: auto; font-size: 11.5px; color: var(--dim2); text-align: right; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+  .status.warn { color: var(--warn); }
+  .errbox { display: none; background: #2a1518; border: 1px solid #55272c; color: #f0a8a8; border-radius: 7px; padding: 9px 12px; font-size: 11.5px; margin-bottom: 12px; }
+  .errbox.show { display: block; }
+  code { background: #0a0d12; padding: 1px 5px; border-radius: 4px; font-size: 11.5px; color: #b8c7dc; }
+</style>
+</head>
+<body>
+<div class="head">
+  <div>
+    <h1>QQ Bot 设置</h1>
+    <div class="sub">改这里等于改 <code>runtime-config.json</code>，保存后 3 秒内生效，不用重启 DSH</div>
+  </div>
+  <div class="badges">
+    <span class="badge" id="b-backend">后端 —</span>
+    <span class="badge" id="b-state">读取中</span>
+  </div>
+</div>
+
+<div class="errbox" id="errbox"></div>
+
+<div class="card">
+  <div class="ct">后端</div>
+  <div class="choices">
+    <div class="choice" data-backend="official" id="c-official">
+      <b>official</b>
+      <span>QQ 官方机器人 · api.bot.qq.com · 凭证在 cordis.patch.yml</span>
+    </div>
+    <div class="choice" data-backend="onebot" id="c-onebot">
+      <b>onebot</b>
+      <span>NapCat / SnowLuma · 用 QQ 号登录 · 本机协议端</span>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="ct">会话</div>
+  <div class="row">
+    <div class="lbl">agent preset<span class="hint">留空 = 群用 qqgroup、私聊用默认</span></div>
+    <input type="text" id="i-preset" placeholder="留空">
+  </div>
+</div>
+
+<div class="card" id="card-group">
+  <div class="ct">群聊策略 <span style="color:var(--dim2);letter-spacing:0;text-transform:none;font-weight:400">仅 onebot 生效</span></div>
+  <div class="row">
+    <div class="lbl">只回 @ 我的</div>
+    <label class="sw"><input type="checkbox" id="i-atonly"><span class="track"></span><span class="swtxt" id="t-atonly">关</span></label>
+  </div>
+  <div class="row">
+    <div class="lbl">关键词<span class="hint">空格或逗号分隔，没 @ 时命中才接</span></div>
+    <input type="text" id="i-keywords" placeholder="肥鱼">
+  </div>
+  <div class="row">
+    <div class="lbl">冷却秒数<span class="hint">0 = 不冷却</span></div>
+    <input type="number" id="i-cooldown" min="0" step="1" placeholder="0">
+  </div>
+  <div class="row">
+    <div class="lbl">主人 QQ 白名单<span class="hint">逗号分隔，只有这些号算主人</span></div>
+    <input type="text" id="i-owners" placeholder="例如 10001,10002">
+  </div>
+</div>
+
+<div class="card" id="card-conn">
+  <div class="ct">OneBot 连接</div>
+  <div class="row">
+    <div class="lbl">API 地址</div>
+    <input type="text" id="i-apibase" placeholder="http://127.0.0.1:3000">
+  </div>
+  <div class="row">
+    <div class="lbl">HTTP token</div>
+    <input type="password" id="i-token" placeholder="发消息用的 Bearer token">
+  </div>
+  <div class="row">
+    <div class="lbl">WS token<span class="hint">和 HTTP 常常不是同一个</span></div>
+    <input type="password" id="i-wstoken" placeholder="留空则沿用 HTTP token">
+  </div>
+  <div class="row">
+    <div class="lbl">WS 地址</div>
+    <input type="text" id="i-wsurl" placeholder="ws://127.0.0.1:3001">
+  </div>
+  <div class="row">
+    <div class="lbl">机器人 QQ 号</div>
+    <input type="text" id="i-selfid" placeholder="机器人自己登录的号">
+  </div>
+  <div class="row">
+    <div class="lbl">事件来源</div>
+    <select id="i-events">
+      <option value="ws">ws · 主动连协议端的正向 WebSocket</option>
+      <option value="http">http · 协议端往本机上报</option>
+    </select>
+  </div>
+  <div class="row">
+    <div class="lbl">上报监听<span class="hint">事件来源 = http 时用</span></div>
+    <input type="text" id="i-listenhost" placeholder="127.0.0.1" style="flex:0 0 150px">
+    <input type="number" id="i-listenport" placeholder="3200" style="flex:0 0 100px">
+    <input type="text" id="i-listenpath" placeholder="/onebot">
+  </div>
+  <div class="row">
+    <div class="lbl">上报签名密钥<span class="hint">留空 = 不校验</span></div>
+    <input type="password" id="i-secret" placeholder="留空">
+  </div>
+</div>
+
+<div class="foot">
+  <button class="primary" id="btn-save">保存</button>
+  <button id="btn-reload">重新读取</button>
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+const F = {
+  backend: "official", preset: "",
+  apibase: "", token: "", wstoken: "", wsurl: "", selfid: "", events: "http",
+  listenhost: "", listenport: "", listenpath: "", secret: "",
+  atonly: false, keywords: "", cooldown: 0, owners: "",
+};
+let raw = {};
+let dirty = false;
+
+const $ = (id) => document.getElementById(id);
+const setStatus = (msg, cls) => { const s = $("status"); s.textContent = msg; s.className = "status" + (cls ? " " + cls : ""); };
+const showErr = (msg) => { const b = $("errbox"); b.textContent = msg; b.classList.toggle("show", !!msg); };
+
+function splitList(v) {
+  return String(v || "").split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+function fill(data) {
+  raw = data || {};
+  const ob = raw.onebot || {};
+  $("i-preset").value = raw.preset || "";
+  $("i-apibase").value = ob.apiBase || "";
+  $("i-token").value = ob.accessToken || "";
+  $("i-wstoken").value = ob.wsToken || "";
+  $("i-wsurl").value = ob.wsUrl || "";
+  $("i-selfid").value = ob.selfId || "";
+  $("i-events").value = ob.events || "http";
+  $("i-listenhost").value = ob.listenHost || "";
+  $("i-listenport").value = ob.listenPort || "";
+  $("i-listenpath").value = ob.listenPath || "";
+  $("i-secret").value = ob.secret || "";
+  $("i-atonly").checked = !!ob.atOnly;
+  $("i-keywords").value = (ob.groupKeywords || []).join(" ");
+  $("i-cooldown").value = ob.groupCooldownSec ?? 0;
+  $("i-owners").value = (ob.ownerUsers || []).join(" ");
+  $("t-atonly").textContent = ob.atOnly ? "开（安静）" : "关（谁说话都接）";
+  syncBackend(raw.backend === "onebot" ? "onebot" : "official");
+  dirty = false;
+}
+
+function syncBackend(b) {
+  F.backend = b;
+  $("c-official").classList.toggle("on", b === "official");
+  $("c-onebot").classList.toggle("on", b === "onebot");
+  $("b-backend").textContent = "后端 " + b;
+  $("b-backend").classList.toggle("on", b === "onebot");
+  const off = b === "official";
+  $("card-group").classList.toggle("dim", off);
+  $("card-conn").classList.toggle("dim", off);
+}
+
+function collect() {
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  return {
+    backend: F.backend,
+    preset: $("i-preset").value.trim(),
+    onebot: {
+      apiBase: $("i-apibase").value.trim(),
+      accessToken: $("i-token").value.trim(),
+      wsToken: $("i-wstoken").value.trim(),
+      wsUrl: $("i-wsurl").value.trim(),
+      selfId: $("i-selfid").value.trim(),
+      events: $("i-events").value === "http" ? "http" : "ws",
+      listenHost: $("i-listenhost").value.trim() || "127.0.0.1",
+      listenPort: num($("i-listenport").value, 3200),
+      listenPath: $("i-listenpath").value.trim() || "/onebot",
+      secret: $("i-secret").value.trim(),
+      atOnly: $("i-atonly").checked,
+      groupKeywords: splitList($("i-keywords").value),
+      groupCooldownSec: num($("i-cooldown").value, 0),
+      ownerUsers: splitList($("i-owners").value),
+    },
+  };
+}
+
+async function load() {
+  setStatus("读取中…");
+  try {
+    const r = await fetch("/api/config", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0, 160));
+    const j = await r.json();
+    fill(j);
+    $("b-state").textContent = "已连接";
+    $("b-state").className = "badge on";
+    setStatus(j.__mtime ? "文件更新于 " + j.__mtime : "已读取", "ok");
+  } catch (e) {
+    $("b-state").textContent = "读不到";
+    $("b-state").className = "badge";
+    setStatus("读取失败", "err");
+    showErr("读取失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+async function save() {
+  showErr("");
+  const body = collect();
+  $("btn-save").disabled = true;
+  setStatus("保存中…");
+  try {
+    const r = await fetch("/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body, null, 2),
+    });
+    const txt = await r.text();
+    if (!r.ok) throw new Error("HTTP " + r.status + " " + txt.slice(0, 300));
+    dirty = false;
+    setStatus("已写入 · 3 秒内生效", "ok");
+    setTimeout(load, 3200);
+  } catch (e) {
+    setStatus("保存失败", "err");
+    showErr("保存失败：" + (e && e.message ? e.message : e));
+  } finally {
+    $("btn-save").disabled = false;
+  }
+}
+
+document.querySelectorAll(".choice").forEach((el) => {
+  el.addEventListener("click", () => {
+    const b = el.dataset.backend;
+    if (b === F.backend) return;
+    syncBackend(b);
+    dirty = true;
+    setStatus("有改动未保存", "warn");
+  });
+});
+
+["i-preset", "i-apibase", "i-token", "i-wstoken", "i-wsurl", "i-selfid", "i-events",
+ "i-listenhost", "i-listenport", "i-listenpath", "i-secret", "i-keywords", "i-cooldown", "i-owners"].forEach((id) => {
+  $(id).addEventListener("input", () => { dirty = true; setStatus("有改动未保存", "warn"); });
+});
+$("i-atonly").addEventListener("change", () => {
+  $("t-atonly").textContent = $("i-atonly").checked ? "开（安静）" : "关（谁说话都接）";
+  dirty = true;
+  setStatus("有改动未保存", "warn");
+});
+
+$("btn-save").addEventListener("click", save);
+$("btn-reload").addEventListener("click", () => { if (dirty && !confirm("有未保存的改动，确定丢弃？")) return; load(); });
+
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); save(); }
+});
+
+load();
+</script>
+</body>
+</html>

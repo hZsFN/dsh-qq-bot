@@ -1,7 +1,7 @@
 {
   "name": "dsh-qq-bot",
-  "version": "2.1.0",
-  "description": "Bridge QQ official bot private messages (C2C) into DeepSeek Harness (dsh) agent sessions",
+  "version": "3.0.0",
+  "description": "Bridge QQ (official bot API and OneBot v11 / NapCat / SnowLuma) into DeepSeek Harness (dsh) agent sessions",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -12,7 +12,8 @@
     "README.md",
     "LICENSE",
     "cordis.patch.example.yml",
-    "README_EN.md"
+    "README_EN.md",
+    "settings-page.html"
   ],
   "keywords": [
     "dsh",
@@ -20,7 +21,11 @@
     "cordis",
     "qq-bot",
     "qq",
-    "bridge"
+    "bridge",
+    "onebot",
+    "napcat",
+    "snowluma",
+    "onebot11"
   ],
   "license": "MIT",
   "peerDependencies": {
