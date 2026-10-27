@@ -102,7 +102,6 @@ config:
 | `appId` / `clientSecret` | 环境变量 | official 后端凭证 |
 | `fixedSessionId` | — | 把私聊固定绑到某个 sessionId |
 | `runtimeConfig` | `''` | 运行时配置文件名（相对插件目录，默认 `runtime-config.json`） |
-| `settingsPort` | `3211` | 设置界面监听的本地端口（改完要重启） |
 
 ### `onebot.*`
 

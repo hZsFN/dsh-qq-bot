@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-bot",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Bridge QQ (official bot API and OneBot v11 / NapCat / SnowLuma) into DeepSeek Harness (dsh) agent sessions",
   "type": "module",
   "main": "index.js",

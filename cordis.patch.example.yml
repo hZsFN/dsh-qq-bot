@@ -53,4 +53,3 @@
         # 该文件含真实配置，记得加进 .gitignore
         # runtimeConfig: 'runtime-config.json'
         # 设置界面端口（默认 3211，改完要重启）
-        # settingsPort: 3211

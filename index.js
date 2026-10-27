@@ -58,7 +58,6 @@ export const Config = z.object({
   preset: z.string().default(""),
   // 运行时配置文件路径；留空 = 插件目录下的 runtime-config.json
   runtimeConfig: z.string().default(""),
-  settingsPort: z.number().int().min(1).max(65535).default(3211),
   // 可选：把 QQ 会话固定绑到指定 sessionId（默认回落 qq-main-<openid前8位>）
   fixedSessionId: z.string().optional(),
   // 可选：只响应这些群（group_openid 列表）；留空 = 所有群都响应
@@ -287,20 +286,35 @@ export function apply(ctx, config = {}) {
     `${API_BASE}/v2/${t.kind === "group" ? "groups" : "users"}/${encodeURIComponent(t.id)}/${tail}`;
 
   // 官方后端：发文字（msg_id 用于被动回复，QQ 要求带上被回复消息 id）
+  // [patch 2026-10-27 by 大肥鱼] 原来非 2xx 只 warn 不抛，qq-send-message 永远报「已发送」；
+  // 实测把 QQ 号当 openid 时接口返回 400 {"code":11255,"err_code":40011028,"message":"请求的资源不存在(用户/群已注销)"}，主人一条也没收到。
+  // 现在如实抛错——所有调用点（811/841/931/941/1581 等）本来就有 catch。
   const officialSendText = async (target, text, msgId) => {
     const t = parseTarget(target);
+    let token;
     try {
-      const token = await getAccessToken();
-      const res = await fetch(apiPath(t, "messages"), {
+      token = await getAccessToken();
+    } catch (e) {
+      ctx.logger.warn(`[qq-bot] 取 access_token 异常: ${e?.message ?? e}`);
+      throw new Error(`取 access_token 失败: ${e?.message ?? e}`);
+    }
+    let res;
+    try {
+      res = await fetch(apiPath(t, "messages"), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `QQBot ${token}` },
         body: JSON.stringify({ content: text, msg_type: 0, msg_id: msgId || "", msg_seq: 1 }),
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        ctx.logger.warn(`[qq-bot] 回复失败 ${res.status}: ${body.slice(0, 200)}`);
-      }
-    } catch (e) { ctx.logger.warn(`[qq-bot] 回复异常: ${e?.message ?? e}`); }
+    } catch (e) {
+      ctx.logger.warn(`[qq-bot] 发送请求异常: ${e?.message ?? e}`);
+      throw new Error(`发送请求异常: ${e?.message ?? e}`);
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const msg = `发送失败 ${res.status}: ${body.slice(0, 200)}`;
+      ctx.logger.warn(`[qq-bot] ${msg}`);
+      throw new Error(msg);
+    }
   };
 
   // ---- 发送图片到 QQ 私聊（富媒体消息：上传 → msg_type=7）----
@@ -585,7 +599,7 @@ export function apply(ctx, config = {}) {
   };
   const isImageCt = (ct) => String(ct || "").startsWith("image/");
   const downloadImages = async (attachments, msgId, prefix = "qq") => {
-    const cwd = config.cwd || "C:\\Users\\13941\\.deepseek harness";
+    const cwd = config.cwd || join(homedir(), ".deepseek harness");
     const inbox = join(cwd, "inbox");
     const out = { saved: [], failed: 0 };
     for (let i = 0; i < attachments.length; i++) {
@@ -827,7 +841,7 @@ export function apply(ctx, config = {}) {
       handle = await ctx.agents.create({
         sessionId: SessionId(sessionId),
         meta: {
-          cwd: config.cwd || "C:\\Users\\13941\\.deepseek harness",
+          cwd: config.cwd || join(homedir(), ".deepseek harness"),
           // 预设：config.preset 指定则统一用它；否则群 qqgroup、私聊默认 dafeiyu
           ...(await presetFor(openid)),
         },
@@ -1340,7 +1354,7 @@ export function apply(ctx, config = {}) {
   // ---- 设置页（本机 HTTP，给 DSH 设置页里的 iframe 用）----
   // [2026-10-26 by 大肥鱼] 只读写 runtime-config.json，不碰 patch；写盘后由 3 秒热读生效。
   let settingsServer = null;
-  const settingsPort = config.settingsPort ?? 3211;
+  const settingsPort = 3211;
   const startSettingsServer = async () => {
     if (settingsServer) return;
     try {
@@ -1575,8 +1589,15 @@ export function apply(ctx, config = {}) {
         if (keys.length === 0) {
           return { ok: false, message: "还没有任何 QQ 用户与本机绑定（qq-bot-sessions.json 为空），无法主动发送。" };
         }
-        openid = keys[0];
-        if (keys.length > 1) dlog(`qq-send-message: 映射里有 ${keys.length} 个用户，默认取第一个 ${openid.slice(0, 8)}…`);
+        // [patch 2026-10-27 by 大肥鱼] 官方后端的 C2C 发送只认 openid；映射里可能同时躺着
+        // 历史遗留的纯数字 QQ 号键（发过去必然 400 code=11255），所以优先挑非纯数字的 openid。
+        const isQqNumber = (k) => /^\d+$/.test(k);
+        const picked = keys.find((k) => !isQqNumber(k)) ?? keys[0];
+        if (keys.length > 1) dlog(`qq-send-message: 映射里有 ${keys.length} 个用户（${keys.map((k) => (isQqNumber(k) ? `QQ号:${k}` : `openid:${k.slice(0, 8)}…`)).join(", ")}），选用 ${picked.slice(0, 8)}…`);
+        openid = picked;
+        if (isQqNumber(openid) && backend === "official") {
+          return { ok: false, message: `映射里只有 QQ 号（${openid}），官方机器人后端不认 QQ 号，请先用真 openid 绑定（让主人私聊一条即可）。` };
+        }
       }
       try {
         await sendText(openid, text, undefined);

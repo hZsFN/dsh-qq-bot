@@ -122,8 +122,12 @@
 <div class="card">
   <div class="ct">会话</div>
   <div class="row">
-    <div class="lbl">agent preset<span class="hint">留空 = 群用 qqgroup、私聊用默认</span></div>
-    <input type="text" id="i-preset" placeholder="留空">
+    <div class="lbl">agent preset<span class="hint">QQ 会话挂哪套 agent 预设</span></div>
+    <select id="i-preset">
+      <option value="">留空（群用 qqgroup，私聊用默认）</option>
+      <option value="dafeiyu">dafeiyu（全部走默认预设）</option>
+      <option value="qqgroup">qqgroup（全部走群聊预设）</option>
+    </select>
   </div>
 </div>
 

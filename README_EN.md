@@ -92,7 +92,6 @@ Open `http://127.0.0.1:3211/` (or embed it via a client plugin that registers `s
 | `appId` / `clientSecret` | env | official credentials |
 | `fixedSessionId` | — | pin private chat to a specific session |
 | `runtimeConfig` | `''` | runtime config filename (relative to the plugin dir) |
-| `settingsPort` | `3211` | local port for the settings UI (needs a restart) |
 
 `onebot.*`: `apiBase`, `accessToken`, `events` (`ws`/`http`), `wsUrl`, `wsToken`, `selfId`, `listenHost`/`listenPort`/`listenPath` (default `127.0.0.1:3200/onebot`), `secret`, `atOnly` (default `true`), `groupKeywords` (`[]`), `groupCooldownSec` (`0`), `ownerUsers` (`[]`, required for DMs on OneBot).
 
