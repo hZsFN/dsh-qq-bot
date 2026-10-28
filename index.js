@@ -732,8 +732,8 @@ export function apply(ctx, config = {}) {
     sendText(openid, text, undefined).catch((e) => dlog(`自动转发失败: ${e?.message ?? e}`));
   });
 
-  // 群会话工具面白名单（2026-10-14）：群里只给联网工具，别的都不给。
-  const QQ_TOOL_ALLOW = new Set(["web_search", "web_fetch"]);
+  // 群会话工具面白名单（2026-10-14；2026-10-28 加 read_image 供识图）：群里只给联网 + 识图，别的都不给。
+  const QQ_TOOL_ALLOW = new Set(["web_search", "web_fetch", "read_image"]); // 2026-10-28：群聊加识图
 
   // ---- 会话 id 规则：私聊 qq-main-<openid 前 8 位>（可用 fixedSessionId 覆盖）；群聊 qq-grp2-<group_openid 前 8 位> ----
   // 2026-10-14：群前缀由 qq-grp- 升为 qq-grp2-。旧 qq-grp-* 会话是在 qqgroup 预设尚未注册时创建的，
