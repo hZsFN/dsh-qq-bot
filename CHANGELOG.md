@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.2.0 (2026-11-02)
+
+### 新增
+- **群聊 / 私聊分别指定 agent preset**：新增 `groupPreset` / `privatePreset`，群消息和私聊各挂各的预设；都留空则回退旧的统一 `preset`，再留空回到「群 `qqgroup`、私聊默认」
+- **设置页 preset 改为动态枚举**：新增 `GET /api/presets`，从 `~/.dsh/.agent-presets/<name>/` 与 `~/.dsh/profiles/*/cordis*.yml` 里内联的 `- id: preset-xxx` 两处来源枚举本机可用预设，群/私聊两个下拉不再写死名字
+- 运行时热配置支持 `groupPreset` / `privatePreset`
+
+### 变更
+- `presetFor()` 解析改为三层：群/私聊专属 → 统一 `preset` → 默认（群 `qqgroup`、私聊默认）
+
 ## v3.1.0 (2026-10-28)
 
 ### 变更

@@ -40,7 +40,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { z } from "zod";
 import { homedir } from "node:os";
 import { join, extname, basename } from "node:path";
-import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export const name = "qq-bot";
@@ -56,6 +56,9 @@ export const Config = z.object({
   cwd: z.string().default(""),
   // [2026-10-26] QQ 会话挂哪个 agent preset：留空 = 群用 qqgroup、私聊用默认 dafeiyu；填 qqgroup 则私聊也用群聊预设
   preset: z.string().default(""),
+  // [2026-10-28] 群聊/私聊各自指定 preset；留空则回退上面的统一 preset
+  groupPreset: z.string().default(""),
+  privatePreset: z.string().default(""),
   // 运行时配置文件路径；留空 = 插件目录下的 runtime-config.json
   runtimeConfig: z.string().default(""),
   // 可选：把 QQ 会话固定绑到指定 sessionId（默认回落 qq-main-<openid前8位>）
@@ -164,6 +167,8 @@ export function apply(ctx, config = {}) {
   // 支持热改：backend / preset / onebot.{apiBase,accessToken,wsToken,wsUrl,selfId,events,
   //           listenHost,listenPort,listenPath,secret,atOnly,groupKeywords,groupCooldownSec,ownerUsers}
   let presetValue = String(config.preset || "").trim();
+  let groupPresetValue = String(config.groupPreset || "").trim();
+  let privatePresetValue = String(config.privatePreset || "").trim();
   const runtimeFile = (() => {
     try {
       if (config.runtimeConfig) return String(config.runtimeConfig);
@@ -766,15 +771,57 @@ export function apply(ctx, config = {}) {
     return ready;
   };
 
-  // [2026-10-26] 会话预设解析：config.preset 指定则所有 QQ 会话统一用它；否则沿用「群 qqgroup、私聊默认」
+  // [2026-10-28] 枚举这台机器上所有可用的 agent preset（给设置页下拉用，不写死任何名字）。
+  // 两个来源合并：
+  //  1) ~/.dsh/.agent-presets/<name>/ —— DSH 的 preset 库，目录名即 preset id（里面有 preset.yml）
+  //  2) ~/.dsh/profiles/<profile>/cordis*.yml 里内联声明的 `- id: preset-xxx`（如 qqgroup 这种只在 profile 里定义的）
+  const listPresets = () => {
+    const found = new Map(); // id -> 来源说明
+    const libDir = join(homedir(), ".dsh", ".agent-presets");
+    try {
+      for (const name of readdirSync(libDir)) {
+        const fp = join(libDir, name);
+        try { if (!statSync(fp).isDirectory()) continue; } catch { continue; }
+        if (existsSync(join(fp, "preset.yml")) || existsSync(join(fp, "agent.cordis.yml"))) {
+          found.set(name, "库");
+        }
+      }
+    } catch { /* ignore */ }
+    const root = join(homedir(), ".dsh", "profiles");
+    try {
+      for (const name of readdirSync(root)) {
+        for (const f of ["cordis.yml", "cordis.patch.yml"]) {
+          const fp = join(root, name, f);
+          if (!existsSync(fp)) continue;
+          let txt = "";
+          try { txt = readFileSync(fp, "utf8"); } catch { continue; }
+          for (const m of txt.matchAll(/-\s*id:\s*preset-([A-Za-z0-9_-]+)/g)) {
+            if (!found.has(m[1])) found.set(m[1], name);
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    return [...found.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([id, from]) => ({ id, from }));
+  };
+
+  // [2026-10-28] 会话预设解析（分层）：群聊/私聊各用各的 preset（groupPreset / privatePreset）；
+  // 都留空则沿用旧的统一 preset；再留空回到「群 qqgroup、私聊默认」。
   const presetFor = async (key) => {
-    const want = presetValue;
+    const isGroup = String(key).startsWith("group:");
+    const want = isGroup ? groupPresetValue : privatePresetValue;
     if (want) {
       if (want === "qqgroup" && !(await hasQqgroupPreset())) return {};
-      dlog(`[preset] 按配置使用 ${want}（key=${String(key).slice(0, 16)}）`);
+      dlog(`[preset] ${isGroup ? "群" : "私聊"}按配置使用 ${want}（key=${String(key).slice(0, 16)}）`);
       return { agentPreset: want };
     }
-    return String(key).startsWith("group:") && (await hasQqgroupPreset())
+    if (presetValue) {
+      if (presetValue === "qqgroup" && !(await hasQqgroupPreset())) return {};
+      dlog(`[preset] 按统一配置使用 ${presetValue}（key=${String(key).slice(0, 16)}）`);
+      return { agentPreset: presetValue };
+    }
+    return isGroup && (await hasQqgroupPreset())
       ? { agentPreset: "qqgroup" }
       : {};
   };
@@ -1312,6 +1359,8 @@ export function apply(ctx, config = {}) {
     const before = connSig();
     if (raw.backend === "official" || raw.backend === "onebot") backend = raw.backend;
     if (raw.preset !== undefined) presetValue = String(raw.preset ?? "").trim();
+    if (raw.groupPreset !== undefined) groupPresetValue = String(raw.groupPreset ?? "").trim();
+    if (raw.privatePreset !== undefined) privatePresetValue = String(raw.privatePreset ?? "").trim();
     if (raw.onebot && typeof raw.onebot === "object") obCfg = { ...obCfg, ...raw.onebot };
     obBase = String(obCfg.apiBase || "").replace(/\/+$/, "");
     const after = connSig();
@@ -1320,7 +1369,7 @@ export function apply(ctx, config = {}) {
       stopBackend();
       setTimeout(startBackend, 400);
     } else {
-      dlog(`运行时配置已应用 (backend=${backend} atOnly=${obCfg.atOnly} kw=${(obCfg.groupKeywords || []).join("/")} cd=${obCfg.groupCooldownSec} preset=${presetValue || "-"})`);
+      dlog(`运行时配置已应用 (backend=${backend} atOnly=${obCfg.atOnly} kw=${(obCfg.groupKeywords || []).join("/")} cd=${obCfg.groupCooldownSec} preset=${presetValue || "-"} group=${groupPresetValue || "-"} private=${privatePresetValue || "-"})`);
     }
   };
   const checkRuntime = () => {
@@ -1381,6 +1430,13 @@ export function apply(ctx, config = {}) {
             return send(500, "text/plain; charset=utf-8", "settings-page.html 读不到: " + (e?.message ?? e));
           }
         }
+        if (pathname === "/api/presets" && req.method === "GET") {
+          try {
+            return send(200, "application/json; charset=utf-8", JSON.stringify({ presets: listPresets() }));
+          } catch (e) {
+            return send(500, "application/json; charset=utf-8", JSON.stringify({ error: e?.message ?? String(e) }));
+          }
+        }
         if (pathname === "/api/config" && req.method === "GET") {
           try {
             const st = statSync(runtimeFile);
@@ -1402,6 +1458,8 @@ export function apply(ctx, config = {}) {
               delete j.__file;
               if (j.backend !== "official" && j.backend !== "onebot") throw new Error("backend 只能是 official 或 onebot");
               if (j.preset != null && typeof j.preset !== "string") throw new Error("preset 必须是字符串");
+              if (j.groupPreset != null && typeof j.groupPreset !== "string") throw new Error("groupPreset 必须是字符串");
+              if (j.privatePreset != null && typeof j.privatePreset !== "string") throw new Error("privatePreset 必须是字符串");
               if (j.onebot != null && (typeof j.onebot !== "object" || Array.isArray(j.onebot))) throw new Error("onebot 必须是对象");
               writeFileSync(runtimeFile, JSON.stringify(j, null, 2) + "\n", "utf8");
               dlog("设置页写入 runtime-config.json，等 3 秒热应用");

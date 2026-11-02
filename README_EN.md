@@ -79,7 +79,7 @@ If the WebSocket keeps failing with `rejected unauthorized WebSocket upgrade`, t
 
 ## Settings UI
 
-Open `http://127.0.0.1:3211/` (or embed it via a client plugin that registers `settings.section` and renders an iframe). Four cards: backend, session preset, group policy, OneBot connection. Saving writes `runtime-config.json`, effective within 3 seconds. Ctrl+S works too.
+Open `http://127.0.0.1:3211/` (or embed it via a client plugin that registers `settings.section` and renders an iframe). Four cards: backend, session preset (plus per-group / per-DM presets picked from a live list via `GET /api/presets`), group policy, OneBot connection. Saving writes `runtime-config.json`, effective within 3 seconds. Ctrl+S works too.
 
 ## Configuration
 
@@ -88,6 +88,8 @@ Open `http://127.0.0.1:3211/` (or embed it via a client plugin that registers `s
 | `backend` | `'official'` | `official` or `onebot`; **single choice**, they cannot run together yet |
 | `enabled` | `true` | disable the plugin |
 | `preset` | `''` | agent preset for all QQ sessions; empty = `qqgroup` for groups, default for DMs |
+| `groupPreset` | `''` | preset for group chats; empty = follow `preset` |
+| `privatePreset` | `''` | preset for DMs; empty = follow `preset` |
 | `cwd` | `$DSH_QQ_BOT_CWD` → process cwd | agent workspace (attachments in `<cwd>/inbox/`) |
 | `appId` / `clientSecret` | env | official credentials |
 | `fixedSessionId` | — | pin private chat to a specific session |
@@ -97,10 +99,10 @@ Open `http://127.0.0.1:3211/` (or embed it via a client plugin that registers `s
 
 ## Hot runtime config
 
-Any field (`backend`, `preset`, `onebot.*`) can live in `runtime-config.json`, polled every 3 seconds:
+Any field (`backend`, `preset`, `groupPreset`, `privatePreset`, `onebot.*`) can live in `runtime-config.json`, polled every 3 seconds:
 
 - connection-level change (token / endpoint / selfId / events) → stop and restart the backend after 400ms
-- policy-only change (`atOnly` / keywords / cooldown / preset) → applied in place, no reconnect
+- policy-only change (`atOnly` / keywords / cooldown / preset / groupPreset / privatePreset) → applied in place, no reconnect
 - malformed JSON → logged, keeps running on the previous config
 
 `enabled` / `appId` / `clientSecret` / `runtimeConfig` still need a profile patch edit plus restart.

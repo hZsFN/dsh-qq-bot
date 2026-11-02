@@ -98,6 +98,8 @@ config:
 | `backend` | `'official'` | `official` / `onebot`，**单选**，两种后端暂不能同时跑 |
 | `enabled` | `true` | 关掉则插件不启动 |
 | `preset` | `''` | 统一指定 agent 预设；留空 = 群用 `qqgroup`、私聊用默认预设 |
+| `groupPreset` | `''` | 群聊专用预设；留空 = 跟随 `preset` |
+| `privatePreset` | `''` | 私聊专用预设；留空 = 跟随 `preset` |
 | `cwd` | `$DSH_QQ_BOT_CWD` → 进程 cwd | agent 工作目录（附件落 `<cwd>/inbox/`） |
 | `appId` / `clientSecret` | 环境变量 | official 后端凭证 |
 | `fixedSessionId` | — | 把私聊固定绑到某个 sessionId |
@@ -121,10 +123,10 @@ config:
 
 ## 运行时热配置
 
-`runtime-config.json` 里可以放上述任意字段（`backend`、`preset`、`onebot.*` 都行），插件每 3 秒检查文件 mtime：
+`runtime-config.json` 里可以放上述任意字段（`backend`、`preset`、`groupPreset`、`privatePreset`、`onebot.*` 都行），插件每 3 秒检查文件 mtime：
 
 - 连接参数变了（token / 地址 / selfId / events…）→ 停旧连接、400ms 后重启后端
-- 只改了策略（`atOnly` / 关键词 / 冷却 / preset）→ 直接换值，不断线
+- 只改了策略（`atOnly` / 关键词 / 冷却 / preset / groupPreset / privatePreset）→ 直接换值，不断线
 - JSON 写坏了 → 只记日志，继续用旧配置跑
 
 **注意**：`enabled` / `appId` / `clientSecret` / `runtimeConfig` 这几项不能靠热配置改，仍要改 profile 的 patch 并重启。

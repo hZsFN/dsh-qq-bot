@@ -122,11 +122,23 @@
 <div class="card">
   <div class="ct">会话</div>
   <div class="row">
-    <div class="lbl">agent preset<span class="hint">QQ 会话挂哪套 agent 预设</span></div>
+    <div class="lbl">agent preset<span class="hint">统一预设；下面两项留空时用它</span></div>
     <select id="i-preset">
       <option value="">留空（群用 qqgroup，私聊用默认）</option>
       <option value="dafeiyu">dafeiyu（全部走默认预设）</option>
       <option value="qqgroup">qqgroup（全部走群聊预设）</option>
+    </select>
+  </div>
+  <div class="row">
+    <div class="lbl">群聊 preset<span class="hint">群消息用这套，留空 = 跟随上面的统一设置</span></div>
+    <select id="i-grouppreset">
+      <option value="">跟随统一设置</option>
+    </select>
+  </div>
+  <div class="row">
+    <div class="lbl">私聊 preset<span class="hint">私聊用这套，留空 = 跟随上面的统一设置</span></div>
+    <select id="i-privatepreset">
+      <option value="">跟随统一设置</option>
     </select>
   </div>
 </div>
@@ -200,7 +212,7 @@
 
 <script>
 const F = {
-  backend: "official", preset: "",
+  backend: "official", preset: "", groupPreset: "", privatePreset: "",
   apibase: "", token: "", wstoken: "", wsurl: "", selfid: "", events: "http",
   listenhost: "", listenport: "", listenpath: "", secret: "",
   atonly: false, keywords: "", cooldown: 0, owners: "",
@@ -216,10 +228,43 @@ function splitList(v) {
   return String(v || "").split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean);
 }
 
+// 从 /api/presets 拉本机可用的 preset 列表，填进 群/私聊 两个下拉（统一那个保持静态三项以兼容旧配置）
+async function loadPresets() {
+  let list = [];
+  try {
+    const r = await fetch("/api/presets", { cache: "no-store" });
+    const j = await r.json();
+    list = Array.isArray(j.presets) ? j.presets : [];
+  } catch (e) {
+    list = [];
+  }
+  for (const id of ["i-grouppreset", "i-privatepreset"]) {
+    const sel = $(id);
+    const keep = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    for (const it of list) {
+      const o = document.createElement("option");
+      o.value = it.id;
+      o.textContent = it.from && it.from !== "库" ? it.id + "（" + it.from + "）" : it.id;
+      sel.appendChild(o);
+    }
+    // 保留当前值（哪怕它不在列表里）
+    if (keep && !list.some((x) => x.id === keep)) {
+      const o = document.createElement("option");
+      o.value = keep;
+      o.textContent = keep + "（当前）";
+      sel.appendChild(o);
+    }
+    sel.value = keep;
+  }
+}
+
 function fill(data) {
   raw = data || {};
   const ob = raw.onebot || {};
   $("i-preset").value = raw.preset || "";
+  $("i-grouppreset").value = raw.groupPreset || "";
+  $("i-privatepreset").value = raw.privatePreset || "";
   $("i-apibase").value = ob.apiBase || "";
   $("i-token").value = ob.accessToken || "";
   $("i-wstoken").value = ob.wsToken || "";
@@ -255,6 +300,8 @@ function collect() {
   return {
     backend: F.backend,
     preset: $("i-preset").value.trim(),
+    groupPreset: $("i-grouppreset").value.trim(),
+    privatePreset: $("i-privatepreset").value.trim(),
     onebot: {
       apiBase: $("i-apibase").value.trim(),
       accessToken: $("i-token").value.trim(),
@@ -281,6 +328,7 @@ async function load() {
     if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0, 160));
     const j = await r.json();
     fill(j);
+    await loadPresets();
     $("b-state").textContent = "已连接";
     $("b-state").className = "badge on";
     setStatus(j.__mtime ? "文件更新于 " + j.__mtime : "已读取", "ok");
@@ -326,7 +374,7 @@ document.querySelectorAll(".choice").forEach((el) => {
   });
 });
 
-["i-preset", "i-apibase", "i-token", "i-wstoken", "i-wsurl", "i-selfid", "i-events",
+["i-preset", "i-grouppreset", "i-privatepreset", "i-apibase", "i-token", "i-wstoken", "i-wsurl", "i-selfid", "i-events",
  "i-listenhost", "i-listenport", "i-listenpath", "i-secret", "i-keywords", "i-cooldown", "i-owners"].forEach((id) => {
   $(id).addEventListener("input", () => { dirty = true; setStatus("有改动未保存", "warn"); });
 });
